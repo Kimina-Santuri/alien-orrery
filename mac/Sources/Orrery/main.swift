@@ -313,6 +313,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         let c = shared ?? civ(for: id)
         var items = [URLQueryItem(name: "seed", value: String(c.0))]
         if let f = c.1 { items.append(URLQueryItem(name: "founded", value: String(f))) }
+        if isLiving, let story = defaults.dictionary(forKey: "civ.\(id)")?["story"] as? [[String: Any]], !story.isEmpty,
+           JSONSerialization.isValidJSONObject(story), let data = try? JSONSerialization.data(withJSONObject: story),
+           let text = String(data: data, encoding: .utf8) {
+            items.append(URLQueryItem(name: "story", value: text))
+        }
         let dust = defaults.double(forKey: Key.dust)
         if dust != 1 { items.append(URLQueryItem(name: "dust", value: String(dust))) }
         if defaults.bool(forKey: Key.useCustom) {
@@ -368,6 +373,12 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
     }
 
     private func toAll(_ js: String) { walls.forEach { $0.run(js) } }
+    /// For anything that rebuilds a picture: one display after another, so they don't all start at once.
+    private func toAllInTurn(_ js: String) {
+        for (index, wall) in walls.enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4 * Double(index)) { wall.run(js) }
+        }
+    }
 
     private func applySound() {
         switch defaults.string(forKey: Key.sound) {
@@ -411,6 +422,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         let age = Int(info["age"] as? Double ?? 0)
         let status = (info["status"] as? String ?? "rising").capitalized
         menu.addItem(note("\(people) · day \(age) · \(status)"))
+        if let type = info["systemType"] as? String { menu.addItem(note(type.capitalized)) }
         if let home = info["home"] as? String, let surface = info["surface"] as? String {
             menu.addItem(note("Home world \(home): \(surface)"))
         }
@@ -428,15 +440,36 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
 
         let zoomTo = NSMenuItem(title: "Zoom to", action: nil, keyEquivalent: "")
         let places = NSMenu()
-        for (kind, label) in [("home", "Home world"), ("sister", "A sister world"), ("colonised", "A colonised moon"), ("moon", "A moon"), ("star", "A star"), ("gate", "A ring gate"), ("wormhole", "A wormhole"), ("station", "A space station"), ("asteroid", "An occupied asteroid"), ("blackhole", "A black hole")] {
+        places.autoenablesItems = false
+        // Only what's on screen somewhere right now can be reached; the rest is greyed out.
+        let reachable = Set(walls.flatMap { $0.civ["places"] as? [String] ?? [] })
+        for (kind, label) in [("home", "Home world"), ("sister", "A sister world"), ("colonised", "A colonised moon"), ("moon", "A moon"), ("star", "A star"), ("pulsar", "A pulsar"), ("gate", "A ring gate"), ("wormhole", "A wormhole"), ("station", "A space station"), ("asteroid", "An occupied asteroid"), ("blackhole", "A black hole")] {
             let item = action(label, #selector(visit))
             item.representedObject = kind
+            item.isEnabled = !shouldPause && reachable.contains(kind)
             places.addItem(item)
         }
         places.addItem(.separator())
-        places.addItem(action("Back to the chart", #selector(backToChart)))
+        let back = action("Back to the chart", #selector(backToChart))
+        back.isEnabled = !shouldPause
+        places.addItem(back)
+        if shouldPause { places.addItem(note("Paused: resume to zoom")) }
         zoomTo.submenu = places
         menu.addItem(zoomTo)
+        menu.addItem(.separator())
+        let history = NSMenuItem(title: "Make history", action: nil, keyEquivalent: "")
+        let stories = NSMenu()
+        for (kind, label, minutes) in [("war", "Start a war", 6), ("ascend", "Let them transcend", 12), ("destroy", "Let them destroy themselves", 3)] {
+            let item = action(label, #selector(makeHistory))
+            item.representedObject = "\(kind):\(minutes)"
+            stories.addItem(item)
+        }
+        stories.addItem(.separator())
+        let undo = action("Undo what you started", #selector(makeHistory))
+        undo.representedObject = "clear:0"
+        stories.addItem(undo)
+        history.submenu = stories
+        menu.addItem(history)
         menu.addItem(.separator())
         menu.addItem(action("Discover another civilisation", #selector(discover), key: "n"))
         menu.addItem(action("Found a new one from nothing", #selector(foundNew)))
@@ -530,7 +563,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         for (index, wall) in walls.enumerated() {
             let s = index == 0 ? seed : Int.random(in: 1...99998)
             let f = founded.map { index == 0 ? $0 : nowMs() - Double.random(in: 30...60) * 86_400_000 }
-            wall.run("orrery.load(\(s), \(f.map { String($0) } ?? "null"))")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4 * Double(index)) { wall.run("orrery.load(\(s), \(f.map { String($0) } ?? "null"))") }
             if isLiving { remember(wall, seed: s, founded: f) }
         }
     }
@@ -544,6 +577,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
     @objc private func visit(_ sender: NSMenuItem) {
         // Each display goes if it has one; a system without a black hole simply stays put.
         toAll("orrery.visit('\(sender.representedObject as? String ?? "home")')")
+    }
+    @objc private func makeHistory(_ sender: NSMenuItem) {
+        let parts = (sender.representedObject as? String ?? "").split(separator: ":")
+        guard parts.count == 2 else { return }
+        toAll("orrery.story('\(parts[0])', \(parts[1]))")
     }
     @objc private func backToChart() { toAll("orrery.chart()") }
     @objc private func discover() {
@@ -603,11 +641,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         defaults.set(false, forKey: Key.useCustom)
         defaults.set(value, forKey: Key.palette)
         toAll("orrery.setCustom(null)")
-        toAll("orrery.setPalette(\(value.isEmpty ? "null" : "'\(value)'"))")
+        toAllInTurn("orrery.setPalette(\(value.isEmpty ? "null" : "'\(value)'"))")
     }
     private func applyCustom() {
         func c(_ k: String) -> String { defaults.string(forKey: k) ?? "#000000" }
-        toAll("orrery.setCustom('\(c(Key.cPaper))','\(c(Key.cInk))','\(c(Key.cInk2))','\(c(Key.cAccent))')")
+        toAllInTurn("orrery.setCustom('\(c(Key.cPaper))','\(c(Key.cInk))','\(c(Key.cInk2))','\(c(Key.cAccent))')")
     }
     @objc private func pickSound(_ sender: NSMenuItem) {
         defaults.set(sender.representedObject as? String ?? "off", forKey: Key.sound)
@@ -669,7 +707,12 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
               let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
         switch body["type"] as? String {
         case "civ":
-            walls.first { $0.web === message.webView }?.civ = body
+            guard let wall = walls.first(where: { $0.web === message.webView }) else { return }
+            wall.civ = body
+            if isLiving, var saved = defaults.dictionary(forKey: "civ.\(wall.id)"), saved["seed"] as? Int == body["seed"] as? Int {
+                saved["story"] = body["story"]
+                defaults.set(saved, forKey: "civ.\(wall.id)")
+            }
         case "video":
             guard let b64 = body["data"] as? String, let video = Data(base64Encoded: b64) else { return }
             let folder = videoFolder()
@@ -781,7 +824,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         defaults.set(sender.doubleValue, forKey: sender.key)
         if sender.key == Key.dust {
             guard NSApp.currentEvent?.type == .leftMouseUp else { return }
-            toAll("orrery.setDust(\(sender.doubleValue))")
+            toAllInTurn("orrery.setDust(\(sender.doubleValue))")
         } else {
             walls.forEach(applyTiming)
         }
@@ -828,6 +871,13 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
                 }.joined()
             }
             try? dump(menu, "").write(toFile: dir + "/menu.txt", atomically: true, encoding: .utf8)
+            if let want = env["ORRERY_MENU"] {
+                let sub = menu.items.compactMap { $0.submenu }.first { $0.items.contains { $0.title == want } }
+                if let sub, let i = sub.items.firstIndex(where: { $0.title == want }) {
+                    NSLog("Orrery test: pressing \(want), enabled=\(sub.items[i].isEnabled)")
+                    sub.performActionForItem(at: i)
+                } else { NSLog("Orrery test: no item \(want)") }
+            }
             if env["ORRERY_OPEN_SETTINGS"] != nil {
                 self.openSettings()
                 try? String(self.settingsWindow?.windowNumber ?? 0).write(toFile: dir + "/settings-window.txt", atomically: true, encoding: .utf8)

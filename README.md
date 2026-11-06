@@ -3,9 +3,15 @@
 Charts of imagined solar systems, as the civilisations living in them might draw them. A live macOS desktop
 wallpaper and a single web page, with nothing to install for the web version and no libraries.
 
-Each civilisation has its own suns, worlds, colours and invented script. It changes over real days and weeks:
-gates open, sister worlds are settled, shipping lanes reach further out, and some civilisations decline, fall silent
-and sometimes return. The view drifts from the home world out to the supercluster and back.
+Each civilisation has its own worlds, colours, building style and invented script. It changes over real days and weeks:
+gates open, moons and sister worlds are settled, shipping lanes reach further out. Some fight wars, some fall silent, some
+take their whole system apart to enclose their star, and some destroy themselves. The view drifts from the home world out
+to the supercluster and back.
+
+Systems follow real and fictional structures: Sun-like stars, planets circling two suns (Kepler-16, Kepler-47), a close pair
+with a distant third (Alpha Centauri), tight worlds round a red dwarf (TRAPPIST-1), giants between dust belts (HR 8799),
+worlds round a pulsar (PSR B1257+12), a sun and a black hole (Gaia BH1), and worlds round a black hole, which is still fiction
+(Gargantua in *Interstellar*).
 
 ## Mac app
 
@@ -16,7 +22,8 @@ The app isn't signed by Apple, so macOS will stop it the first time. Open it onc
 
 It lives in the menu bar and draws behind your desktop icons. From the menu you can read the civilisation's chronicle,
 discover another, save favourites, change the view and colours, zoom to a star, moon, gate, wormhole, space station,
-occupied asteroid or black hole, make it react to sound, and save images and videos.
+occupied asteroid, pulsar or black hole, start a war or a transcendence yourself, make it react to sound, and save images and
+videos. The script at the bottom of the screen is a real cipher, and now and then flips letter by letter into English.
 By default it pauses on battery and in Low Power Mode; untick **Pause on battery** to keep it moving.
 
 Rough cost on an M1 Pro at 3600 x 2338: 13 to 47% of one CPU core when moving, about 0.1% when paused, and
