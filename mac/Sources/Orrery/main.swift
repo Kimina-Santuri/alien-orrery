@@ -204,6 +204,8 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
     private let listener = SoundListener()
     private var soundNote: String?
     private var settingsWindow: NSWindow?
+    private var exploreWindow: NSWindow?
+    private var exploreWeb: WKWebView?
     private var spanTimer: Timer?
 
     private let palettes: [(String, String)] = [
@@ -471,6 +473,8 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         history.submenu = stories
         menu.addItem(history)
         menu.addItem(.separator())
+        menu.addItem(action("Explore this system…", #selector(openExplore), key: "e"))
+        menu.addItem(.separator())
         menu.addItem(action("Discover another civilisation", #selector(discover), key: "n"))
         menu.addItem(action("Found a new one from nothing", #selector(foundNew)))
         menu.addItem(favouritesItem())
@@ -713,6 +717,16 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
                 saved["story"] = body["story"]
                 defaults.set(saved, forKey: "civ.\(wall.id)")
             }
+        case "still":
+            guard let b64 = body["data"] as? String, let png = Data(base64Encoded: b64) else { return }
+            let folder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures/Orrery")
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let file = folder.appendingPathComponent("orrery-\(body["seed"] as? Int ?? 0)-\(Int(Date().timeIntervalSince1970)).png")
+            do { try png.write(to: file); NSWorkspace.shared.activateFileViewerSelecting([file]) }
+            catch { NSLog("Orrery: could not save the still: \(error)") }
+        case "useSeed":
+            guard let seed = body["seed"] as? Int else { return }
+            load(seed: seed, founded: isLiving ? (body["founded"] as? Double) : nil)
         case "video":
             guard let b64 = body["data"] as? String, let video = Data(base64Encoded: b64) else { return }
             let folder = videoFolder()
@@ -730,6 +744,44 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
     }
 
     // MARK: Settings window
+
+    /// The wallpaper sits below the desktop icons and can't be clicked, so touching a system happens in its own window.
+    @objc private func openExplore() {
+        if let open = exploreWindow {
+            NSApp.activate(ignoringOtherApps: true)
+            open.makeKeyAndOrderFront(nil)
+            return
+        }
+        let info = walls.first?.civ ?? [:]
+        var items = [URLQueryItem(name: "explore", value: "1")]
+        if let seed = info["seed"] as? Int { items.append(URLQueryItem(name: "seed", value: String(seed))) }
+        if let founded = info["founded"] as? Double { items.append(URLQueryItem(name: "founded", value: String(founded))) }
+        if let palette = info["palette"] as? String { items.append(URLQueryItem(name: "palette", value: palette)) }
+
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        w.title = "Explore"
+        w.minSize = NSSize(width: 720, height: 480)
+        w.isReleasedWhenClosed = false
+        let config = WKWebViewConfiguration()
+        config.userContentController.add(self, name: "app")
+        let web = WKWebView(frame: w.contentView!.bounds, configuration: config)
+        web.autoresizingMask = [.width, .height]
+        w.contentView = web
+        var parts = URLComponents(url: html, resolvingAgainstBaseURL: false)!
+        parts.queryItems = items
+        web.loadFileURL(parts.url!, allowingReadAccessTo: html.deletingLastPathComponent())
+        exploreWindow = w
+        exploreWeb = web
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: w, queue: .main) { [weak self] _ in
+            self?.exploreWeb?.stopLoading()
+            self?.exploreWeb?.configuration.userContentController.removeAllScriptMessageHandlers()
+            self?.exploreWeb = nil
+            self?.exploreWindow = nil
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        w.center()
+        w.makeKeyAndOrderFront(nil)
+    }
 
     @objc private func openSettings() {
         if settingsWindow == nil { settingsWindow = buildSettings() }
@@ -877,6 +929,15 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
                     NSLog("Orrery test: pressing \(want), enabled=\(sub.items[i].isEnabled)")
                     sub.performActionForItem(at: i)
                 } else { NSLog("Orrery test: no item \(want)") }
+            }
+            // Open Explore and save a picture of it, to check the real window from a script.
+            if let out = env["ORRERY_EXPLORE_SHOT"] {
+                self.openExplore()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 9) {
+                    self.exploreWeb?.takeSnapshot(with: nil) { image, _ in
+                        if let tiff = image?.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) { try? png.write(to: URL(fileURLWithPath: out)) }
+                    }
+                }
             }
             if env["ORRERY_OPEN_SETTINGS"] != nil {
                 self.openSettings()

@@ -1,5 +1,7 @@
 /* ---- The site layer: pages as worlds, routes between them, and one continuing story ---- */
 function pageFromUrl() {
+  if (OPTS.mini) return 'mini';
+  if (document.body.classList.contains('orrery-page')) return 'sliders';
   const current = document.querySelector('.side-nav a[aria-current="page"]');
   const name = (current ? current.getAttribute('href') : location.pathname.split('/').pop() || 'index.html').replace(/\.html.*$/, '');
   if (document.body.classList.contains('home') || name === 'index' || name === '') return 'home';
@@ -16,6 +18,8 @@ function assignPages(s) {
   s.worldOf = new Map([...s.pageOf].map(([o, n]) => [n, o]));
 }
 const SITE = { page: pageFromUrl(), hover: null, cameFrom: null, arrivedAt: 0 };
+SITE.chart = ['home', 'sliders', 'mini'].includes(SITE.page);
+const onSliders = SITE.page === 'sliders';
 
 function drawPageLabels(s) {
   ctx.font = '400 10px "JetBrains Mono", ui-monospace, Menlo, monospace';
@@ -342,8 +346,9 @@ function useUniverse(u) {
 }
 /* When a civilisation is finished, watch the ruins for a minute, then another begins. */
 function siteTick() {
+  sliderTick();
   const c = sys && sys.civState;
-  if (!c || !c.final || pendingBuild || forcedSeed) return;
+  if (!c || !c.final || pendingBuild || forcedSeed || OPTS.mini) return;
   if (c.age - c.final.d0 > 1) {
     universe = freshUniverse();
     saveUniverse(universe);
@@ -373,14 +378,16 @@ function start(seed, built) {
   cam.u = 1;
   cam.hold = 20;
   /* Only the home page wanders through the scales, and only on devices with room. */
-  cam.auto = !frozen && !LITE && SITE.page === 'home';
+  cam.auto = !frozen && (onSliders || (!LITE && SITE.page === 'home'));
+  cam.stay = onSliders;
+  exp.want = null;
   render(startAt);
   /* Full strength on the map; quieter behind a page's text. */
-  canvas.style.opacity = SITE.page === 'home' ? '1' : '0.4';
+  canvas.style.opacity = SITE.chart ? '1' : '0.4';
   if (frozen) return;
   startedAt = performance.now();
   lastDraw = startedAt;
-  if (SITE.cameFrom) SITE.arrivedAt = startedAt + 700;
+  if (SITE.cameFrom && sys.scene) SITE.arrivedAt = startedAt + 700;
   if (!sys.scene && cam.auto) preload(sys); else sys.ready = true;
   resume();
 }
@@ -393,6 +400,42 @@ function resume() {
 let inView = true;
 function newSeed() { return 1 + Math.floor(Math.random() * 99998); }
 
+/* The sliders on the Orrery's own page. Nothing on the universe itself is clickable here. */
+let sliderScale = 0;
+function sliderTick() {
+  if (!onSliders || !sys || frozen || cam.u < 1 || exp.want !== null) return;
+  if (sliderScale !== Math.round(cam.z)) zoomLevel(sliderScale);
+}
+function setHistoryRate(rate) {
+  /* Keep today's date in their history: only how fast it runs from here changes. */
+  const age = (Date.now() - civFounded) * civRate / DAY_MS;
+  civRate = rate;
+  civFounded = Date.now() - age * DAY_MS / rate;
+  civTimer = 0;
+}
+function wireSliders() {
+  const box = document.querySelector('.orrery-sliders');
+  if (!box) return;
+  if (frozen) { box.hidden = true; return; }
+  const words = { scale: ['A solar system', 'Nearby stars', 'A galaxy', 'A galaxy group', 'A supercluster'] };
+  const show = (i, text) => { const o = i.parentElement.querySelector('output'); if (o) o.textContent = text; };
+  box.querySelectorAll('input[type=range]').forEach(i => {
+    const kind = i.dataset.control;
+    const apply = () => {
+      const v = parseFloat(i.value);
+      if (kind === 'speed') { simSpeed = v; show(i, `${v.toFixed(2)}×`); }
+      if (kind === 'history') { setHistoryRate(RATE * v); show(i, `${(v * 24 * 60 / 60).toFixed(v < 1 ? 1 : 0)} hours a minute`); }
+      if (kind === 'scale') { sliderScale = v; show(i, words.scale[v]); }
+      if (kind === 'dust') show(i, `${v.toFixed(1)}×`);
+    };
+    i.addEventListener('input', apply);
+    /* Dust is painted into the chart, so it redraws only when you let go. */
+    if (kind === 'dust') i.addEventListener('change', () => { dustMul = parseFloat(i.value); swapSystem(sys.seed); });
+    apply();
+  });
+}
+
+if (!OPTS.mini) {
 /* Pointing at a page in the menu lights up its route. */
 document.querySelectorAll('.side-nav a').forEach(a => {
   const name = (a.getAttribute('href') || '').replace(/\.html.*$/, '');
@@ -419,13 +462,45 @@ window.addEventListener('resize', () => {
   }, 200);
 });
 
+}
+
 viewMode = 'star';
 changeEvery = 0;
+if (OPTS.mini) {
+  /* Painted only once it scrolls into view, and resting whenever it's out of view. */
+  civFounded = Date.now() - 60 * DAY_MS / RATE;
+  civRate = RATE;
+  civStory = [];
+  let begun = false;
+  const begin = () => {
+    begun = true;
+    if (frozen) { start(OPTS.seed); return; }
+    const gen = buildGen(OPTS.seed, canvas.clientWidth, canvas.clientHeight);
+    const step = () => {
+      const until = performance.now() + 6;
+      while (performance.now() < until) {
+        const x = gen.next();
+        if (x.done) { start(OPTS.seed, x.value); return; }
+      }
+      requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  };
+  new IntersectionObserver(entries => {
+    inView = entries[entries.length - 1].isIntersecting;
+    if (inView && !begun) begin(); else resume();
+  }, { rootMargin: '200px' }).observe(canvas);
+  document.addEventListener('visibilitychange', resume);
+  return;
+}
 useUniverse(universe);
-if (universe.last && universe.last !== SITE.page) SITE.cameFrom = universe.last;
-universe.last = SITE.page;
-universe.at = Date.now();
-saveUniverse(universe);
+if (onSliders) wireSliders();
+if (!onSliders) {
+  if (universe.last && universe.last !== SITE.page) SITE.cameFrom = universe.last;
+  universe.last = SITE.page;
+  universe.at = Date.now();
+  saveUniverse(universe);
+}
 
 /* The page's words come first; the universe is painted a slice at a time behind them, and fades in. */
 if (frozen) start(universe.seed);

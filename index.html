@@ -144,7 +144,8 @@ const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const frozen = params.has('still') || reduceMotion;
 const startAt = parseFloat(params.get('t')) || 0;
 const testZ = params.has('z') ? parseFloat(params.get('z')) : null;
-const wallpaper = params.has('wallpaper'); /* run by the Mac app: no controls, driven through window.orrery */
+const explore = params.has('explore'); /* the Mac app's Explore window: clickable, with a panel */
+const wallpaper = params.has('wallpaper') || explore; /* run by the Mac app: no controls, driven through window.orrery */
 let forcedPalette = null, customPalette = null, dustMul = 1;
 
 let sys = null;
@@ -3775,6 +3776,7 @@ function stepCam(dt) {
     return;
   }
   if (cam.stopAtChart) { cam.stopAtChart = false; cam.auto = false; return; }
+  if (cam.stay) { stayStep(); return; }
   if (cam.planned === null || cam.planned === undefined) planNext(sys);
   cam.hold -= dt;
   /* Wait until the destination is painted, so the journey itself never stalls. */
@@ -4025,6 +4027,7 @@ function civHistory(seed, s, age) {
   /* Finish to the exact moment, so an arc you started keeps moving between six-hour ticks. */
   while (storyAt < story.length && story[storyAt].d <= age) { beginArc(story[storyAt].d, story[storyAt].kind, story[storyAt].dur); storyAt++; }
   advanceArc(age);
+  st.worldNames = worldNames;
   return st;
 }
 
@@ -4378,6 +4381,7 @@ function drawOverlays() {
     }
   }
   if (showChronicle && s.civState) drawChronicle(s);
+  if (explore) drawExplore(s);
 }
 
 /* The panel is a real cipher: every letter has its own glyph in this civilisation's script. Now and then
@@ -4604,6 +4608,10 @@ if (wallpaper) {
       cam.from = cam.z; cam.to = 0; cam.u = 0; cam.dur = ASKED_JOURNEY;
     },
     options() { return JSON.stringify(focusOptions(sys).map(f => f.label)); },
+    /* For testing: where each clickable place is right now. */
+    pos() { return JSON.stringify(explore ? focusOptions(sys, true).map(f => { const [x, y] = xyOf(sys, f); return { id: f.id, kind: f.kind, x, y }; }) : []); },
+    /* For tools/trait_table.py: what a seed decides, at the current size, without showing it. */
+    traitsFor(seed) { const b = build(seed, canvas.clientWidth || 400, canvas.clientHeight || 300); return traitsOf(b).map(x => [x[0], x[2]]); },
     report: tellApp,
     history(age) { return JSON.stringify(civHistory(sys.seed, sys, age)); },
     state() {
@@ -4613,6 +4621,351 @@ if (wallpaper) {
     },
   };
 }
+
+/* ---- Explore: every system can be named, shared and touched. Used by the Mac app's Explore window and the website. ---- */
+/*SITE-SKIP*/
+const TRAITS = /*TRAITS*/{"system":{"binary":{"p":18,"seeds":[1,6,14,32,41,48,51,69,70,83,86,87]},"compact":{"p":15,"seeds":[2,4,9,11,15,17,18,19,30,35,36,42]},"triple":{"p":8,"seeds":[3,28,29,34,63,84,100,107,134,154,167,171]},"single":{"p":22,"seeds":[5,7,10,20,22,31,49,52,53,54,55,59]},"debris":{"p":10,"seeds":[8,13,16,23,39,40,66,71,80,89,90,97]},"pulsar":{"p":7,"seeds":[12,47,62,72,77,95,98,140,156,161,175,193]},"starhole":{"p":7,"seeds":[21,25,50,60,65,82,92,101,111,135,149,150]},"hole":{"p":13,"seeds":[24,26,27,33,37,38,43,44,45,56,57,58]}},"surface":{"continents":{"p":25,"seeds":[1,8,10,13,16,23,25,32,34,37,48,49]},"desert":{"p":9,"seeds":[2,14,20,27,41,52,64,68,79,96,116,147]},"ice":{"p":14,"seeds":[3,4,17,19,26,42,46,50,58,59,71,77]},"water":{"p":21,"seeds":[5,24,28,31,38,44,45,51,53,55,60,61]},"archipelago":{"p":12,"seeds":[6,7,21,22,29,40,43,57,66,83,88,97]},"eyeball":{"p":7,"seeds":[9,11,15,18,30,35,36,74,110,117,125,128]},"barren":{"p":4,"seeds":[12,47,62,72,95,98,140,156,196,223,242,279]},"pangaea":{"p":8,"seeds":[33,39,54,82,84,86,103,121,122,157,167,180]}},"size":{"1":{"p":34,"seeds":[1,2,8,10,11,14,16,20,22,23,24,25]},"3":{"p":16,"seeds":[3,6,7,17,33,36,55,63,67,69,78,85]},"2":{"p":28,"seeds":[4,5,9,12,15,19,21,27,28,34,37,41]},"0":{"p":22,"seeds":[13,18,32,43,48,53,70,72,75,79,81,87]}},"base":{"7":{"p":20,"seeds":[1,2,3,6,17,20,24,26,27,32,37,42]},"8":{"p":20,"seeds":[4,9,13,16,23,34,46,47,61,63,66,75]},"9":{"p":20,"seeds":[5,15,18,22,25,29,36,38,39,40,71,78]},"5":{"p":20,"seeds":[7,8,10,21,31,41,44,49,51,52,55,56]},"6":{"p":20,"seeds":[11,12,14,19,28,30,33,35,43,45,50,53]}},"culture":{"arc":{"p":33,"seeds":[1,3,4,7,9,11,15,18,19,21,22,25]},"bloom":{"p":33,"seeds":[2,5,6,8,12,16,23,28,33,34,37,40]},"lattice":{"p":33,"seeds":[10,13,14,17,20,24,30,31,39,52,53,55]}}}/*END*/;
+const SIZE_NAMES = ['6,000 km', '13,000 km', '30,000 km', '90,000 km'];
+function traitsOf(s) {
+  return [
+    ['system', 'System', s.arch.id, s.arch.label.toLowerCase()],
+    ['surface', 'Home world', String(s.surface), String(s.surface).toLowerCase()],
+    ['size', 'Home size', String(s.homeClass), SIZE_NAMES[s.homeClass]],
+    ['base', 'Counts in', String(s.base), `base ${s.base}`],
+    ['culture', 'Builds in', s.culture, { arc: 'arcs', lattice: 'lattices', bloom: 'blooms' }[s.culture] || s.culture],
+  ];
+}
+/*END-SITE-SKIP*/
+const exp = { hover: null, sel: null, flights: [], log: [], want: null, seed: 0, els: null, wheel: 0, refreshed: 0, lastPick: 0 };
+/*SITE-SKIP*/
+const nameOf = (s, f) => (f.kind === 'world' && s.civState && s.civState.worldNames ? s.civState.worldNames[f.ref.i] : f.label);
+const xyOf = (s, f) => { const keep = s.focus; s.focus = f; const p = focusPosition(s, lastCamT); s.focus = keep; return p; };
+const atChart = () => Math.abs(cam.z) < 0.02 && cam.u >= 1;
+
+function pickAt(x, y) {
+  const s = sys;
+  if (!s || !atChart()) return null;
+  let best = null, bestD = Infinity;
+  for (const f of focusOptions(s, true)) {
+    const [px, py] = xyOf(s, f);
+    const R = Math.max((f.ref.r || 0) * lerp(1, s.vs, cam.k), 7) + 7;
+    const d = Math.hypot(x - px, y - py);
+    if (d < R && d / R < bestD) { best = f; bestD = d / R; }
+  }
+  return best;
+}
+/* The same place in a rebuilt list, since options are made fresh each time. */
+const stillThere = (s, f) => f && focusOptions(s, true).find(o => o.id === f.id);
+
+/*END-SITE-SKIP*/
+function zoomLevel(l) {
+  if (frozen || cam.u < 1 || exp.want !== null) return;
+  l = clamp(l, 0, LEVEL_MAX);
+  if (l === Math.round(cam.z)) return;
+  for (let L = 1; L <= LEVEL_MAX; L++) if (l >= L) { queueJob(sys, () => plateDisc(sys, L)); queueJob(sys, () => plate(sys, L)); }
+  exp.want = l;
+}
+/* Called by the camera while it stays where it was put. */
+function stayStep() {
+  if (exp.want === null || backlog.some(j => j.s === sys)) return;
+  cam.from = cam.z; cam.to = exp.want; cam.u = 0; cam.dur = 3.5; exp.want = null;
+  if (exp.els) exploreRefresh(true);
+}
+/*SITE-SKIP*/
+function zoomInto(f) {
+  if (frozen || !atChart() || !f) return;
+  goTo(f);
+  cam.dur = 4;
+  exploreRefresh(true);
+}
+function backToChart() {
+  if (frozen || cam.z === 0 || cam.u < 1) return;
+  cam.from = cam.z; cam.to = 0; cam.u = 0; cam.dur = 3.5;
+  exploreRefresh(true);
+}
+function sendShip(f) {
+  const s = sys;
+  const home = focusOptions(s, true).find(o => o.id === 'home') || focusOptions(s, true).find(o => o.kind === 'world' && o.id !== f.id);
+  if (!home || home.id === f.id) return;
+  const [ax, ay] = xyOf(s, home), [bx, by] = xyOf(s, f);
+  const serial = digits(1 + Math.floor(Math.random() * (Math.pow(s.base, 3) - 1)), s.base).join('');
+  exp.flights.push({ from: home, to: f, at: performance.now(), dur: 5000 + Math.min(9000, Math.hypot(bx - ax, by - ay) * 12),
+    bow: (Math.random() < 0.5 ? -1 : 1) * (0.1 + Math.random() * 0.15), hull: Math.floor(Math.random() * 3), serial, done: 0 });
+  exp.log.unshift(`Ship ${serial} left for ${nameOf(s, f)}`);
+  exp.log.length = Math.min(exp.log.length, 5);
+  exploreRefresh(true);
+}
+function drawFlights(s) {
+  const now = performance.now(), { pal, fleet } = s;
+  for (let i = exp.flights.length - 1; i >= 0; i--) {
+    const fl = exp.flights[i], u = (now - fl.at) / fl.dur;
+    const [ax, ay] = xyOf(s, fl.from), [bx, by] = xyOf(s, fl.to);
+    if (u >= 1) {
+      if (!fl.done) {
+        fl.done = now;
+        exp.log.unshift(`Ship ${fl.serial} reached ${nameOf(s, fl.to)}`);
+        exp.log.length = Math.min(exp.log.length, 5);
+        exploreRefresh(true);
+      }
+      const w = (now - fl.done) / 1400;
+      if (w >= 1) { exp.flights.splice(i, 1); continue; }
+      ctx.globalAlpha = 1 - w;
+      ctx.strokeStyle = pal.accent; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.arc(bx, by, 8 + w * 26, 0, TAU); ctx.stroke();
+      ctx.globalAlpha = 1;
+      continue;
+    }
+    const e = smooth(0, 1, u), L = Math.hypot(bx - ax, by - ay) || 1;
+    const cx = (ax + bx) / 2 - ((by - ay) / L) * L * fl.bow, cy = (ay + by) / 2 + ((bx - ax) / L) * L * fl.bow;
+    const at = v => { const q = 1 - v; return [q * q * ax + 2 * q * v * cx + v * v * bx, q * q * ay + 2 * q * v * cy + v * v * by]; };
+    ctx.strokeStyle = pal.accent; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    for (let v = 0; v <= e; v += 0.04) { const [x, y] = at(v); if (v) ctx.lineTo(x, y); else ctx.moveTo(x, y); }
+    ctx.stroke(); ctx.setLineDash([]);
+    const [x, y] = at(e), [x2, y2] = at(Math.min(1, e + 0.01));
+    const d = Math.hypot(x2 - x, y2 - y) || 1, tx = (x2 - x) / d, ty = (y2 - y) / d, r = 5;
+    ctx.fillStyle = pal.accent;
+    ctx.beginPath();
+    for (const contour of HULLS[(fleet ? fleet.hulls[fl.hull] : fl.hull)]) {
+      contour.forEach(([px, py], j) => { const X = x + (px * tx - py * ty) * r, Y = y + (px * ty + py * tx) * r; if (j) ctx.lineTo(X, Y); else ctx.moveTo(X, Y); });
+      ctx.closePath();
+    }
+    ctx.fill();
+  }
+}
+function drawExplore(s) {
+  if (exp.seed !== s.seed) {
+    exp.seed = s.seed; exp.hover = null; exp.sel = null; exp.flights.length = 0; exp.log.length = 0;
+    try { history.replaceState(null, '', location.pathname + location.search + '#' + s.seed); } catch (e) { /* file pages */ }
+    exploreRefresh(true);
+  }
+  if (performance.now() - exp.refreshed > 2000) exploreRefresh();
+  if (!atChart()) return;
+  drawFlights(s);
+  ctx.font = '11px ui-monospace, Menlo, monospace';
+  ctx.textBaseline = 'middle';
+  for (const f of [exp.sel, exp.hover]) {
+    if (!f || (f === exp.sel && exp.hover && exp.hover.id === f.id)) continue;
+    const [x, y] = xyOf(s, f), R = Math.max((f.ref.r || 0) * lerp(1, s.vs, cam.k), 5) + 6;
+    ctx.strokeStyle = s.pal.accent; ctx.lineWidth = f === exp.sel ? 1.8 : 1.1;
+    ctx.beginPath(); ctx.arc(x, y, R, 0, TAU); ctx.stroke();
+    const text = nameOf(s, f), w = ctx.measureText(text).width, left = x + R + 6 + w + 8 > s.W;
+    const tx = left ? x - R - 8 - w : x + R + 8;
+    ctx.fillStyle = s.pal.paper; ctx.fillRect(tx - 3, y - 9, w + 6, 18);
+    ctx.fillStyle = s.pal.ink; ctx.fillText(text, tx, y);
+  }
+  ctx.textBaseline = 'alphabetic';
+}
+
+function saveStill() {
+  const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.app;
+  if (h) { h.postMessage(JSON.stringify({ type: 'still', seed: sys.seed, data: canvas.toDataURL('image/png').split(',')[1] })); return; }
+  canvas.toBlob(blob => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `orrery-${sys.seed}.png`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }, 'image/png');
+}
+function openSeed(seed) {
+  if (!(seed > 0)) return;
+  const founded = Date.now() - (30 + Math.random() * 60) * 86400000 / civRate;
+  if (frozen) { civFounded = founded; start(seed); exp.seed = 0; drawExplore(sys); return; }
+  loadSeed(seed, founded);
+}
+function exploreEl(tag, cls, text, on) {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (text !== undefined) el.textContent = text;
+  if (on) el.addEventListener('click', on);
+  return el;
+}
+function exploreRefresh(force) {
+  const s = sys, E = exp.els;
+  if (!s || !E || (!force && E.panel.dataset.open === 'false')) return;
+  exp.refreshed = performance.now();
+  E.panel.style.setProperty('--ox-paper', s.pal.paper);
+  E.panel.style.setProperty('--ox-ink', s.pal.ink);
+  E.panel.style.setProperty('--ox-accent', s.pal.accent);
+  if (document.activeElement !== E.seed) E.seed.value = s.seed;
+  /* Traits, with how often each turns up; a click opens another system that has it. */
+  E.traits.replaceChildren();
+  let odds = 1;
+  for (const [key, label, value, shown] of traitsOf(s)) {
+    const t = TRAITS[key] && TRAITS[key][value];
+    if (t) odds *= t.p / 100;
+    const row = exploreEl('div', 'ox-row');
+    row.append(exploreEl('span', 'ox-key', label));
+    const b = exploreEl('button', 'ox-trait', shown, () => {
+      const seeds = (t && t.seeds || []).filter(n => n !== s.seed);
+      if (seeds.length) openSeed(seeds[Math.floor(Math.random() * seeds.length)]);
+    });
+    b.type = 'button';
+    b.title = 'Open another system with this';
+    row.append(b, exploreEl('span', 'ox-share', t ? `${t.p}%` : ''));
+    E.traits.append(row);
+  }
+  E.odds.textContent = odds < 1 ? `About 1 in ${Math.round(1 / odds).toLocaleString('en-GB')} systems look like this` : '';
+  const c = s.civState;
+  E.civ.replaceChildren();
+  if (c) for (const line of panelLines(s).slice(0, 5)) E.civ.append(exploreEl('div', '', line.toLowerCase()));
+  /* The selected place. */
+  const f = exp.sel;
+  E.card.hidden = !f;
+  E.card.replaceChildren();
+  if (f) {
+    E.card.append(exploreEl('h3', 'ox-title', nameOf(s, f)), exploreEl('div', 'ox-sub', f.label));
+    if (f.kind === 'world') {
+      const o = f.ref, bits = [String(o.surface || '').toLowerCase(), `${o.moons.length} ${o.moons.length === 1 ? 'moon' : 'moons'}`];
+      if (o.shattered) bits.push('shattered');
+      else if (o.living) bits.push(o.settled === false ? 'not yet settled' : 'inhabited');
+      E.card.append(exploreEl('div', 'ox-sub', bits.filter(Boolean).join(' / ')));
+      const name = nameOf(s, f);
+      for (const e of (c ? c.events : []).filter(v => v.text.includes(name)).slice(-3)) E.card.append(exploreEl('div', 'ox-event', `Day ${Math.floor(e.d)}: ${e.text}`));
+    }
+    const row = exploreEl('div', 'ox-actions');
+    if (!frozen) {
+      row.append(exploreEl('button', 'ox-btn', 'Zoom in', () => zoomInto(f)));
+      if (f.id !== 'home') row.append(exploreEl('button', 'ox-btn', 'Send a ship', () => sendShip(f)));
+    }
+    E.card.append(row);
+  }
+  E.log.replaceChildren(...exp.log.map(l => exploreEl('div', 'ox-event', l)));
+  /* Scale controls. */
+  const level = clamp(Math.round(cam.z), LEVEL_MIN, LEVEL_MAX), name = level === -1 ? s.focus.label : LEVELS[level][0];
+  E.scale.textContent = name;
+  E.back.hidden = frozen || level === 0;
+  E.out.disabled = frozen || level >= LEVEL_MAX;
+  E.view.textContent = cam.viewTo ? 'Star view' : 'Home view';
+  E.wander.textContent = cam.stay ? 'Wander' : 'Stop wandering';
+  /* Every place, for the keyboard and for anyone who can't hit a small target. */
+  const key = s.seed + ':' + focusOptions(s, true).map(o => o.id).join();
+  if (E.places.dataset.key !== key) {
+    E.places.dataset.key = key;
+    E.places.replaceChildren(exploreEl('option', '', 'Go to a place…'));
+    for (const o of focusOptions(s, true)) { const x = exploreEl('option', '', nameOf(s, o) === o.label ? o.label : `${nameOf(s, o)} (${o.label.toLowerCase()})`); x.value = o.id; E.places.append(x); }
+  }
+}
+function initExplore() {
+  const css = document.createElement('style');
+  css.textContent = `
+  .ox-panel { position:fixed; top:var(--ox-top,16px); right:16px; z-index:4; width:min(310px,calc(100vw - 32px)); max-height:calc(100vh - var(--ox-top,16px) - 16px); overflow:auto; box-sizing:border-box; padding:14px; background:var(--ox-paper); color:var(--ox-ink); border:1px solid var(--ox-ink); font:11.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; text-shadow:none; }
+  .ox-panel[data-open="false"] { width:auto; padding:0; border:0; background:none; overflow:visible; }
+  .ox-panel[data-open="false"] > :not(.ox-toggle) { display:none; }
+  .ox-panel button,.ox-panel select,.ox-panel input { font:inherit; color:inherit; background:var(--ox-paper); border:1px solid var(--ox-ink); border-radius:0; }
+  .ox-panel button { min-height:30px; padding:3px 9px; cursor:pointer; text-shadow:none; }
+  .ox-panel button:hover:not(:disabled) { background:var(--ox-ink); color:var(--ox-paper); }
+  .ox-panel button:disabled { opacity:.35; cursor:default; }
+  .ox-panel :focus-visible { outline:2px solid var(--ox-accent); outline-offset:1px; }
+  .ox-toggle { float:right; margin:-4px -4px 0 6px; }
+  .ox-seed { display:flex; gap:6px; align-items:center; margin:0 0 10px; }
+  .ox-seed input { width:84px; min-height:30px; padding:3px 7px; box-sizing:border-box; }
+  .ox-seedlabel { letter-spacing:.1em; }
+  .ox-row { display:grid; grid-template-columns:78px minmax(0,1fr) 36px; gap:6px; align-items:center; margin-bottom:3px; }
+  .ox-key,.ox-share,.ox-sub { opacity:.72; }
+  .ox-share { text-align:right; }
+  .ox-panel .ox-trait { min-width:0; white-space:normal; min-height:24px; padding:1px 6px; border:0; border-bottom:1px solid currentColor; text-align:left; line-height:1.25; }
+  .ox-odds { margin:8px 0 12px; }
+  .ox-civ { margin:0 0 12px; padding-top:10px; border-top:1px solid var(--ox-ink); }
+  .ox-card { margin:0 0 12px; padding:10px 0; border-top:1px solid var(--ox-ink); }
+  .ox-title { margin:0 0 3px; font:inherit; font-size:14px; font-weight:600; letter-spacing:0; }
+  .ox-event { margin-top:5px; }
+  .ox-actions,.ox-tools { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  .ox-scale { margin-top:12px; padding-top:10px; border-top:1px solid var(--ox-ink); }
+  .ox-panel select { width:100%; min-height:30px; margin-top:8px; }
+  .ox-hint { margin:8px 0 0; opacity:.72; }
+  @media (pointer:coarse) { .ox-panel button,.ox-panel select,.ox-seed input { min-height:44px; } .ox-panel .ox-trait { min-height:36px; } }`;
+  document.head.append(css);
+  const panel = exploreEl('aside', 'ox-panel');
+  panel.setAttribute('aria-label', 'This system');
+  panel.dataset.open = String(window.innerWidth >= 820);
+  const toggle = exploreEl('button', 'ox-toggle', panel.dataset.open === 'true' ? 'Hide' : 'Details', () => {
+    const open = panel.dataset.open !== 'true';
+    panel.dataset.open = String(open);
+    toggle.textContent = open ? 'Hide' : 'Details';
+    if (open) exploreRefresh(true);
+  });
+  const seedRow = exploreEl('form', 'ox-seed');
+  const seed = exploreEl('input');
+  seed.inputMode = 'numeric'; seed.setAttribute('aria-label', 'Seed number');
+  seedRow.append(exploreEl('span', 'ox-seedlabel', 'SEED'), seed, exploreEl('button', '', 'Open'));
+  seedRow.addEventListener('submit', e => { e.preventDefault(); openSeed(parseInt(seed.value, 10)); seed.blur(); });
+  const traits = exploreEl('div'), odds = exploreEl('div', 'ox-odds'), civ = exploreEl('div', 'ox-civ'), card = exploreEl('div', 'ox-card'), log = exploreEl('div');
+  card.hidden = true;
+  card.setAttribute('aria-live', 'polite');
+  const scale = exploreEl('span'), back = exploreEl('button', '', 'Back to chart', backToChart);
+  const out = exploreEl('button', '', 'Zoom out', () => zoomLevel(Math.round(cam.z) + 1));
+  const inward = exploreEl('button', '', 'Zoom in', () => { const l = Math.round(cam.z); if (l > 0) zoomLevel(l - 1); else if (exp.sel) zoomInto(exp.sel); });
+  const view = exploreEl('button', '', 'Home view', () => {
+    cam.viewTo = cam.viewTo ? 0 : 1;
+    viewMode = cam.viewTo ? 'home' : 'star';
+    if (cam.viewTo) { homeLayer(sys); homeDisc(sys); }
+    if (frozen) { cam.k = cam.viewTo; render(startAt); }
+    exploreRefresh(true);
+  });
+  const wander = exploreEl('button', '', 'Wander', () => { cam.stay = !cam.stay; cam.hold = 3; exploreRefresh(true); });
+  const fresh = exploreEl('button', '', 'New system', () => openSeed(newSeed()));
+  const places = exploreEl('select');
+  places.setAttribute('aria-label', 'Go to a place in this system');
+  places.addEventListener('change', () => {
+    const f = stillThere(sys, { id: places.value });
+    places.selectedIndex = 0;
+    if (!f) return;
+    exp.sel = f;
+    exploreRefresh(true);
+  });
+  const tools = exploreEl('div', 'ox-tools');
+  tools.append(fresh, view, wander, exploreEl('button', '', 'Save still', saveStill));
+  const app = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.app;
+  if (app) tools.append(exploreEl('button', '', 'Use as wallpaper', () => app.postMessage(JSON.stringify({ type: 'useSeed', seed: sys.seed, founded: civFounded }))));
+  const scaleBox = exploreEl('div', 'ox-scale');
+  const scaleRow = exploreEl('div', 'ox-tools');
+  scaleRow.append(inward, out, back);
+  scaleBox.append(scale, scaleRow);
+  panel.append(toggle, seedRow, traits, odds, civ, card, log, tools, scaleBox, places, exploreEl('p', 'ox-hint', 'Click a world, moon, gate or star. Scroll to zoom. Esc to go back.'));
+  document.body.append(panel);
+  panel.querySelectorAll('button').forEach(b => { b.type = b.parentElement === seedRow ? 'submit' : 'button'; });
+  exp.els = { panel, seed, traits, odds, civ, card, log, scale, back, out, view, wander, places };
+
+  const local = e => { const r = canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+  canvas.addEventListener('pointermove', e => {
+    const now = performance.now();
+    if (now - exp.lastPick < 40) return;
+    exp.lastPick = now;
+    exp.hover = pickAt(...local(e));
+    canvas.style.cursor = exp.hover ? 'pointer' : '';
+    if (frozen && sys) { render(startAt); drawExplore(sys); }
+  });
+  canvas.addEventListener('pointerleave', () => { exp.hover = null; canvas.style.cursor = ''; });
+  canvas.addEventListener('click', e => {
+    exp.sel = pickAt(...local(e));
+    exploreRefresh(true);
+    if (frozen && sys) { render(startAt); drawExplore(sys); }
+  });
+  canvas.addEventListener('dblclick', e => { const f = pickAt(...local(e)); if (f) zoomInto(f); });
+  canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    exp.wheel += e.deltaY;
+    if (Math.abs(exp.wheel) < 40) return;
+    const dir = exp.wheel > 0 ? 1 : -1;
+    exp.wheel = 0;
+    const l = Math.round(cam.z);
+    if (l === -1) { if (dir > 0) backToChart(); return; }
+    if (l === 0 && dir < 0) { const f = exp.hover || exp.sel; if (f) zoomInto(f); return; }
+    zoomLevel(l + dir);
+  }, { passive: false });
+  addEventListener('keydown', e => {
+    if (e.key !== 'Escape' || e.target.matches('input,select')) return;
+    if (cam.z !== 0) backToChart(); else { exp.sel = null; exploreRefresh(true); }
+  });
+  cam.stay = true;
+  viewMode = 'star';
+  changeEvery = 0;
+  scheduleSwap();
+  exploreRefresh(true);
+}
+/*END-SITE-SKIP*/
 
 function currentSeed() {
   const n = parseInt(location.hash.slice(1), 10);
@@ -4664,7 +5017,7 @@ function start(seed, built) {
   }
 }
 
-function newSeed() { return 1 + Math.floor(Math.random() * 9998); }
+function newSeed() { return 1 + Math.floor(Math.random() * 99998); }
 
 const viewBtn = document.getElementById('view');
 const zoomBtn = document.getElementById('zoom');
@@ -4724,8 +5077,10 @@ if (wallpaper) {
     canvas.style.width = spanInfo[2] + 'px';
     canvas.style.height = spanInfo[3] + 'px';
   }
+  if (explore) { const h = parseInt(location.hash.slice(1), 10); if (h > 0) params.set('seed', h); cam.viewTo = 0; }
   start(parseInt(params.get('seed'), 10) || newSeed());
   scheduleSwap();
+  if (explore) initExplore();
 } else {
   const first = currentSeed();
   if (first) start(first); else location.hash = newSeed();
