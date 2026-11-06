@@ -163,3 +163,23 @@ half-screen windows.
 Not verified: real audio capture from either source (permission prompts, needs the user), real second display, menu clicks by hand,
 the Open Anyway flow on another Mac, sleep and wake, multi-day running, GPU power.
 Intel Macs: not built. Universal builds need Xcode's build system.
+
+## 2026-11-06 (night): more zoom destinations, Orrery 0.3.0
+User's request: more zoom items for desktop: space stations, occupied asteroids, wormholes, black holes, stars, moons if colonised, and more.
+
+Zoom level -1 is no longer only the home world. `s.focus` picks what it shows, and `buildCloseup` dispatches to `buildWorld` (any world), `buildMoon`, `buildStar`,
+`buildGateClose` (ring gate or wormhole), `buildStation`, `buildAsteroid` and `buildBlackHole`. `focusOptions` lists what exists and is on screen, `chooseFocus` picks by weight,
+`prepareFocus` paints the next one during a pause so the journey doesn't stall, `rememberCloseup` keeps the home world and two others in memory. From the chart, 40% of journeys are dives.
+`s.features` holds stations, occupied asteroids and the black hole (about 45% of systems roll one, and it needs a spot in view). `civHistory` adds their dates from its own stream `q2`, so
+existing histories keep their past. `orrery.visit(kind)`, `orrery.chart()` and the app's Zoom to menu go there on demand. Test with `?z=-1&focus=blackhole`.
+Close-ups paint a moon's or star's civ state at build time, so one kept in memory can lag a new colony until it's rebuilt. Black holes are only in the home system; the galaxy's core isn't a destination.
+
+Verified: 28 systems with every kind of destination visited at z -0.6 and -1 and no page errors; the same civilisation at day 3 and day 300 shows the right items; each close-up viewed;
+the real app ran 95 s with non-stop zooming and no page errors, using very roughly 33-47% of one core and 330-460 MB (CPU pids found by a looser method than before, so treat as approximate).
+Not verified: Zoom to clicked by hand (menu contents were dumped), a long session. Released as 0.3.0 with the grain redraw below (user's go-ahead).
+
+## 2026-11-06 (night): close-ups redrawn in grain
+User's request: give the station, star and other new close-ups "the same grainy aesthetic". Flat fills and vector hulls are gone. `grainDisc`, `grainBand` and `grainBar` draw shaded
+balls, belts with one hard edge, and struts; `grainSprite` stipples a turning part once (habitat, gate collar) so it can rotate without redrawing its dots; `grainNight` gives moons a dithered
+night instead of a flat tint. Watch density: dots overlap into solid colour above about `dens` 1.5, so check at full resolution. Sprites are built only in the recording pass (`g.__ops`).
+Home and other worlds keep their earlier flat night tint. Lanes, ships, labels and range rings are still vector, as on the chart. The chart's small station, asteroid and black hole icons are vector too.

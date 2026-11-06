@@ -492,6 +492,55 @@ function build(seed, W, H) {
     if (meet) syncShips(l, meet.world.T, meet.meetAt);
   }
 
+  /* Stations, occupied asteroids, and in some systems a black hole. */
+  const fq = mulberry(seed * 2654435761 + 719);
+  const FR = (a, b) => a + (b - a) * fq();
+  sysObj.features = [];
+  const spotInView = rad => {
+    for (let t = 0; t < 50; t++) {
+      const ang = fq() * TAU, x = cx + Math.cos(ang) * rad, y = cy + Math.sin(ang) * rad;
+      if (x > 60 && y > 60 && x < W - 60 && y < H - 130) return ang;
+    }
+    return null;
+  };
+  const orbiter = (kind, id, rad, size) => {
+    const ang = spotInView(rad);
+    if (ang === null) return null;
+    const T = worlds[0].T * Math.pow(rad / a0, 1.5);
+    return {
+      feature: true, kind, id, a: rad, e: 0.01, w: 0, T, ph: ang, x: 0, y: 0, r: size, open: true, style: Math.floor(fq() * 3),
+      spin: FR(0.1, 0.4) * (fq() < 0.5 ? -1 : 1), glyph: makeGlyph(fq),
+    };
+  };
+  const between = () => {
+    const k = Math.floor(fq() * Math.max(1, n - 1));
+    return lerp(worlds[k].a, (worlds[k + 1] || { a: worlds[k].a * 1.4 }).a, FR(0.3, 0.7));
+  };
+  for (let i = 0, c = 1 + Math.floor(fq() * 3); i < c; i++) {
+    const f = orbiter('station', 'station' + i, between(), FR(6, 9) * px);
+    if (f) sysObj.features.push(f);
+  }
+  /* An asteroid belt's occupied rocks share one band. */
+  const beltK = Math.floor(fq() * Math.max(1, n - 1)), beltA = lerp(worlds[beltK].a, (worlds[beltK + 1] || { a: worlds[beltK].a * 1.4 }).a, 0.5);
+  for (let i = 0, c = 2 + Math.floor(fq() * 4); i < c; i++) {
+    const f = orbiter('asteroid', 'asteroid' + i, beltA * FR(0.96, 1.04), FR(3, 6) * px);
+    if (f) sysObj.features.push(f);
+  }
+  if (fq() < 0.45) {
+    const ang = spotInView(lerp(worlds[0].a, reach * 0.7, FR(0.35, 0.8)));
+    if (ang !== null) {
+      const rad = lerp(worlds[0].a, reach * 0.7, 0.6);
+      sysObj.features.push({ feature: true, kind: 'blackhole', id: 'blackhole', fixed: true, gx: Math.cos(ang) * rad, gy: Math.sin(ang) * rad, x: 0, y: 0, r: FR(7, 13) * px, tilt: FR(0.22, 0.4), open: true });
+    }
+  }
+  for (const f of sysObj.features) {
+    if (f.kind === 'blackhole') continue;
+    sysObj.lanes.push(makeLane(fq, f, sysObj.gates.length && fq() < 0.4 ? sysObj.gates[0] : hub, 1 + Math.floor(fq() * 2), 30, false));
+  }
+  sysObj.focus = { id: 'home', kind: 'world', ref: hub, label: 'Home world' };
+  sysObj.closeups = {};
+  worlds.forEach(o => o.moons.forEach((m, i) => { m.parent = o; m.index = i; m.colonised = true; }));
+
   return sysObj;
 }
 
@@ -881,11 +930,65 @@ function drawWorld(s, o, t) {
   const reachK = lerp(1, Math.max(1, homeBoost), o.home ? k : 0);
   for (const m of o.moons) {
     const a = (t / m.T) * TAU + m.ph;
-    ctx.fillStyle = pal.ink;
+    ctx.fillStyle = m.colonised && o.living ? pal.accent : pal.ink;
     ctx.beginPath();
     ctx.arc(x + Math.cos(a) * m.d * reachK, y + Math.sin(a) * m.d * reachK, m.s, 0, TAU);
     ctx.fill();
   }
+}
+
+function featurePos(s, f, t) {
+  if (f.fixed) { place(s, f.gx, f.gy); }
+  else {
+    const a = (t / f.T) * TAU + f.ph;
+    place(s, Math.cos(a) * f.a, Math.sin(a) * f.a);
+  }
+  f.x = VX; f.y = VY;
+}
+
+function drawFeature(s, f, t, thin, k) {
+  const { pal } = s;
+  const { x, y, r } = f;
+  const keep = ctx.globalAlpha;
+  if (f.dead) ctx.globalAlpha = keep * 0.35;
+  if (f.kind === 'station') {
+    const a = t * f.spin;
+    ctx.fillStyle = pal.paper;
+    ctx.beginPath(); ctx.arc(x, y, r + 2 * thin, 0, TAU); ctx.fill();
+    ctx.strokeStyle = pal.ink;
+    ctx.lineWidth = 1.1 * thin * k;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.stroke();
+    ctx.beginPath();
+    for (let i = 0; i < 4; i++) {
+      const b = a + (i / 4) * TAU;
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + Math.cos(b) * r, y + Math.sin(b) * r);
+    }
+    ctx.stroke();
+    ctx.fillStyle = pal.accent;
+    ctx.beginPath(); ctx.arc(x, y, r * 0.25, 0, TAU); ctx.fill();
+  } else if (f.kind === 'asteroid') {
+    ctx.fillStyle = pal.ink;
+    ctx.beginPath();
+    for (let i = 0; i < 7; i++) {
+      const b = (i / 7) * TAU + f.ph, q = r * (0.72 + 0.34 * Math.sin(i * 2.7 + f.ph * 5));
+      if (i) ctx.lineTo(x + Math.cos(b) * q, y + Math.sin(b) * q); else ctx.moveTo(x + Math.cos(b) * q, y + Math.sin(b) * q);
+    }
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = pal.accent;
+    ctx.beginPath(); ctx.arc(x, y, Math.max(0.9, r * 0.24), 0, TAU); ctx.fill();
+  } else if (f.kind === 'blackhole') {
+    ctx.strokeStyle = pal.accent;
+    ctx.lineWidth = 1 * thin * k;
+    for (const m of [1.7, 2.3]) {
+      ctx.beginPath(); ctx.ellipse(x, y, r * m, r * m * f.tilt, -0.3, 0, TAU); ctx.stroke();
+    }
+    ctx.fillStyle = '#040404';
+    ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
+    ctx.lineWidth = 0.9 * thin * k;
+    ctx.beginPath(); ctx.arc(x, y, r + 1.2 * thin, 0, TAU); ctx.stroke();
+  }
+  ctx.globalAlpha = keep;
 }
 
 /* Half a ring: drawn in two passes, so a world sits inside its own rings. */
@@ -1759,11 +1862,12 @@ function twinkles(r, n, pick) {
 
 function buildWorld(s) {
   const b = plateBase(s, 211);
-  const { g, r, u, k, min, max } = b, { pal, surface } = s;
-  const home = s.worlds[s.homeIdx];
-  const Rw = min * [0.2, 0.29, 0.37, 0.46][s.homeClass];
+  const { g, r, u, k, min, max } = b, { pal } = s;
+  const home = s.focus.ref;
+  const surface = home.surface;
+  const Rw = home.home ? min * [0.2, 0.29, 0.37, 0.46][s.homeClass] : min * clamp(0.2 + (home.r / (40 * s.px)) * 0.26, 0.2, 0.44);
   const la = r() * TAU, lx = Math.cos(la), ly = Math.sin(la);
-  const surf = makeSurface(surface, mulberry(s.seed * 2654435761 + 829));
+  const surf = makeSurface(surface, mulberry(s.seed * 2654435761 + 829 + (home.home ? 0 : home.i * 7)));
   const height = surf.field;
   const ring = home.ring;
   const ringInner = ring ? Rw * ring.a1 : 0, ringOuter = ring ? Rw * ring.a2 : 0;
@@ -1817,7 +1921,7 @@ function buildWorld(s) {
 
   /* City lights are drawn live, so they come on as night passes over them. */
   const lights = [];
-  const lightTries = 2600 * Math.pow(Rw / (min * 0.29), 2);
+  const lightTries = home.living ? 2600 * Math.pow(Rw / (min * 0.29), 2) : 0;
   for (let i = 0; i < lightTries; i++) {
     const a = r() * TAU, d = Math.sqrt(r()) * Rw * 0.98;
     const x = Math.cos(a) * d, y = Math.sin(a) * d;
@@ -1888,7 +1992,7 @@ function buildWorld(s) {
   }
 
   /* Sister worlds hang in the sky, each with the mark of the living. */
-  const sisters = s.worlds.filter(o => o.living && !o.home);
+  const sisters = s.worlds.filter(o => o.living && o !== home);
   let sa = r() * TAU;
   const sr = Math.max(Rw * 1.5, Math.min(max * 0.42, min * 0.46));
   for (const o of sisters) {
@@ -1923,17 +2027,648 @@ function buildWorld(s) {
   const port = { x: lx * Rw, y: ly * Rw };
   const ga = tq() * TAU, gd = Math.min(lr + 34 * k, min * 0.46);
   const orbital = { x: Math.cos(ga) * gd, y: Math.sin(ga) * gd, r: 13 * k, kind: tq() < 0.75 ? 'gate' : 'wormhole', spin: 0.2 };
-  const lanes = [makeLane(tq, port, orbital, 4, 18, true)];
-  const gatesHere = [orbital];
+  const lanes = home.living ? [makeLane(tq, port, orbital, 4, 18, true)] : [];
+  const gatesHere = home.living ? [orbital] : [];
   moons.forEach((m, i) => {
     const ang = Math.atan2(ly, lx) + (i % 2 ? 1 : -1) * (0.5 + i * 0.28);
     const dock = { x: Math.cos(ang) * m.d, y: Math.sin(ang) * m.d, r: 3.2 * k, kind: 'port' };
     gatesHere.push(dock);
+    if (!home.living) return;
     const lane = makeLane(tq, port, dock, 2, 15, false);
     syncShips(lane, m.T, ((((ang - m.ph) % TAU) + TAU) % TAU) / TAU * m.T);
     lanes.push(lane);
   });
-  return { R: b.R, mx: 0, my: 0, spin: 0, tw: [], world: { Rw, lights, base: la, count: lights.length / 3 }, moons, lanes, gates: gatesHere, k, comms: makeComms(mulberry(s.seed * 2654435761 + 617), [[port, orbital]], [port], 10, 9, Rw * 0.7) };
+  return { R: b.R, mx: 0, my: 0, spin: 0, tw: [], world: { Rw, lights, base: la, count: lights.length / 3 }, moons, lanes, gates: gatesHere, k, subject: home, comms: home.living ? makeComms(mulberry(s.seed * 2654435761 + 617), [[port, orbital]], [port], 10, 9, Rw * 0.7) : { ftl: [], radio: [] } };
+}
+
+/* ---- Close-ups for everything else worth visiting ---- */
+function starfield(b, s, dots, keepOut) {
+  const { r, u, R } = b;
+  for (let i = 0, n = (R / u) * (R / u) * 0.05; i < n; i++) {
+    const a = r() * TAU, d = Math.sqrt(r()) * R;
+    const x = Math.cos(a) * d, y = Math.sin(a) * d;
+    if (keepOut && keepOut(x, y)) continue;
+    if (r() > 1 - smooth(0.7, 1, d / R)) continue;
+    dots.add(r() < 0.75 ? 1 : 0, x, y, (0.55 + r() * r() * 0.5) * u);
+  }
+}
+const emptyTraffic = () => ({ lanes: [], gates: [], comms: { ftl: [], radio: [] } });
+
+function outsideShipLanes(q, b, target, count, baseT, hot) {
+  /* Traffic coming in from beyond the frame. */
+  const lanes = [];
+  for (let i = 0; i < count; i++) {
+    const a = q() * TAU, d = Math.hypot(b.min, b.max) * 0.62;
+    lanes.push(makeLane(q, { x: Math.cos(a) * d, y: Math.sin(a) * d }, target, 1 + Math.floor(q() * 3), baseT, hot && i === 0));
+  }
+  return lanes;
+}
+
+/* ---- A small kit for drawing anything out of grain, so nothing here is a flat shape ---- */
+function grainDisc(d, r, x, y, R, u, o) {
+  /* A shaded ball of dots: thick on the lit side, thinning into the dark, hard at the rim. */
+  const lx = o.lx || 0, ly = o.ly || 0, shade = o.shade === undefined ? 0.9 : o.shade;
+  const n = Math.PI * (R / u) * (R / u) * (o.dens || 1);
+  for (let i = 0; i < n; i++) {
+    const a = r() * TAU, t = Math.sqrt(r()), nx = Math.cos(a) * t, ny = Math.sin(a) * t;
+    const lit = clamp(0.5 + (nx * lx + ny * ly) * 0.9, 0, 1);
+    const keep = (1 - shade) + shade * lit;
+    const rim = smooth(0.9, 1, t);
+    const v = o.value ? o.value(nx, ny) : 1;
+    if (r() > keep * v + rim * 0.3) continue;
+    const c = o.colour ? o.colour(nx, ny, lit, r) : 0;
+    d.add(c, x + nx * R, y + ny * R, (0.55 + r() * r() * (o.big === undefined ? 0.9 : o.big) * (0.4 + lit)) * u);
+  }
+}
+function grainBand(d, r, x, y, r0, r1, u, o) {
+  /* A ring with one hard edge that thins away from it, like the chart's dust belts. */
+  const n = Math.PI * Math.abs(r1 * r1 - r0 * r0) / (u * u) * (o.dens || 1);
+  const a0 = o.from === undefined ? 0 : o.from, a1 = o.to === undefined ? TAU : o.to, fall = o.fall || 2;
+  const span = (a1 - a0) / TAU;
+  for (let i = 0; i < n * span; i++) {
+    const a = a0 + r() * (a1 - a0), t = Math.pow(r(), fall);
+    const rad = lerp(r0, r1, t);
+    if (o.value && r() > o.value(a, t)) continue;
+    d.add(o.colour ? o.colour(t, r) : t < 0.3 ? 0 : 1, x + Math.cos(a) * rad, y + Math.sin(a) * rad, (0.55 + r() * r() * (o.big === undefined ? 0.9 : o.big) * (1 - t)) * u);
+  }
+}
+function grainBar(d, r, x0, y0, x1, y1, w, u, o) {
+  /* A strut: grain packed along a line, with crisp sides. */
+  o = o || {};
+  const len = Math.hypot(x1 - x0, y1 - y0), n = (len * w) / (u * u) * (o.dens || 1.6);
+  const nx = -(y1 - y0) / (len || 1), ny = (x1 - x0) / (len || 1);
+  for (let i = 0; i < n; i++) {
+    const t = r(), off = (r() - 0.5) * w;
+    d.add(o.colour === undefined ? 0 : o.colour, lerp(x0, x1, t) + nx * off, lerp(y0, y1, t) + ny * off, (0.5 + r() * r() * 0.7) * u);
+  }
+}
+function grainSprite(s, R, paint) {
+  /* A picture made of grain that can be turned each frame without drawing every dot again. */
+  const size = Math.ceil(R * 2 * s.dpr);
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const g = c.getContext('2d');
+  g.setTransform(size / (R * 2), 0, 0, size / (R * 2), size / 2, size / 2);
+  paint(g, (R * 2) / size);
+  return { c, R };
+}
+function drawSprite(sp, angle) {
+  ctx.save();
+  ctx.rotate(angle);
+  ctx.drawImage(sp.c, -sp.R, -sp.R, sp.R * 2, sp.R * 2);
+  ctx.restore();
+}
+function grainNight(s, R, q) {
+  /* Night as print shows it: a dense speckle of the background, not a flat tint. */
+  return grainSprite(s, R, (g, u) => {
+    g.fillStyle = s.pal.paper;
+    g.beginPath();
+    for (let i = 0, n = (R / u) * (R / u) * 0.85; i < n; i++) {
+      const x = (q() * 2 - 1) * R, y = (q() * 2 - 1) * R, rad = (0.6 + q() * 0.6) * u;
+      g.rect(x - rad, y - rad, rad * 2, rad * 2);
+    }
+    g.fill();
+  });
+}
+
+function buildBlackHole(s) {
+  const b = plateBase(s, 241);
+  const { g, r, u, k, min, R } = b, { pal } = s;
+  const f = s.focus.ref, Rb = min * 0.11, tilt = f.tilt, rot = -0.3;
+  const c = Math.cos(rot), sn = Math.sin(rot);
+  const disc = front => {
+    const d = dotBuckets([pal.ink, pal.ink2, pal.accent]);
+    const n = (Rb / u) * (Rb / u) * 30;
+    for (let i = 0; i < n; i++) {
+      const a = r() * TAU, t = Math.pow(r(), 1.7);
+      if ((Math.sin(a) > 0) !== front) continue;
+      const rho = lerp(Rb * 1.6, Rb * 5.6, t);
+      const x = Math.cos(a) * rho, y = Math.sin(a) * rho * tilt;
+      if (r() > 0.55 + 0.45 * Math.sin(t * 90 + r() * 0.5)) continue;
+      d.add(t < 0.22 && r() < 0.75 ? 2 : r() < 0.2 + 0.7 * (1 - t) ? 0 : 1, x * c - y * sn, x * sn + y * c, (0.55 + r() * r() * (1 - t)) * u);
+    }
+    d.flush(g, 0.8 * u);
+  };
+  const stars = dotBuckets([pal.ink, pal.ink2, pal.accent]);
+  /* Starlight thickens where the hole bends it into a ring around itself. */
+  starfield(b, s, stars, (x, y) => Math.hypot(x, y) < Rb * 2);
+  grainBand(stars, r, 0, 0, Rb * 1.9, Rb * 3.4, u, { dens: 0.22, fall: 2.6, colour: () => 1, big: 0.3 });
+  stars.flush(g, 0.8 * u);
+  disc(false);
+  /* Light from the far side of the disc, bent up and over the hole. */
+  const bent = dotBuckets([pal.accent, pal.ink]);
+  grainBand(bent, r, 0, 0, Rb * 1.14, Rb * 1.86, u, { dens: 1.5, fall: 2.2, big: 0.9, colour: t => (t < 0.28 ? 0 : 1) });
+  bent.flush(g, 0.8 * u);
+  /* The hole is the one truly empty thing here, cut clean by grain packed against its edge. */
+  g.fillStyle = '#030303';
+  g.beginPath(); g.arc(0, 0, Rb, 0, TAU); g.fill();
+  const lip = dotBuckets([pal.accent]);
+  grainBand(lip, r, 0, 0, Rb, Rb * 1.12, u, { dens: 2.2, fall: 2.4, big: 1, colour: () => 0 });
+  lip.flush(g, 0.8 * u);
+  disc(true);
+  rangeRings(g, s, 0, 0, [Rb * 6.3], k);
+  glyphWord(g, s, r, Rb * 6.5, 0, 4, k, pal.ink);
+  const q = mulberry(s.seed * 2654435761 + 743);
+  const clumps = Array.from({ length: 160 }, () => ({ rho: Rb * (1.7 + q() * q() * 3.6), a: q() * TAU, s: (0.5 + q() * 0.9) * k }));
+  return {
+    R, mx: 0, my: 0, spin: 0, tw: [], k, ...emptyTraffic(),
+    liveDraw(t) {
+      ctx.fillStyle = pal.accent;
+      ctx.beginPath();
+      for (const m of clumps) {
+        const w = 2.2 * Math.pow(Rb / m.rho, 1.5), a = m.a + t * w;
+        const x0 = Math.cos(a) * m.rho, y0 = Math.sin(a) * m.rho * tilt;
+        const x = x0 * c - y0 * sn, y = x0 * sn + y0 * c;
+        if (Math.sin(a) < 0 && Math.hypot(x, y) < Rb * 1.05) continue;
+        ctx.moveTo(x + m.s, y);
+        ctx.arc(x, y, m.s, 0, TAU);
+      }
+      ctx.fill();
+    },
+  };
+}
+
+function buildStar(s) {
+  const b = plateBase(s, 251);
+  const { g, r, u, k, min, R } = b, { pal } = s;
+  const sun = s.focus.ref, Rs = min * 0.4, tint = sun.tint;
+  const light = mix(tint, pal.paper, 0.42), deep = mix(tint, '#000000', 0.32);
+  const q = mulberry(s.seed * 2654435761 + 761);
+  const d = dotBuckets([pal.ink, pal.ink2, tint, light, deep]);
+  starfield(b, s, d, (x, y) => Math.hypot(x, y) < Rs * 1.3);
+  /* The corona: streamers of grain packed against the limb, thinning outwards. */
+  const ph = [q() * TAU, q() * TAU, q() * TAU];
+  const flow = a => 0.5 + 0.22 * Math.sin(a * 5 + ph[0]) + 0.16 * Math.sin(a * 13 + ph[1]) + 0.12 * Math.sin(a * 37 + ph[2]);
+  for (let i = 0, n = (Rs / u) * (Rs / u) * 2.2; i < n; i++) {
+    const a = r() * TAU, t = Math.pow(r(), 2.6), f = flow(a);
+    if (r() > f) continue;
+    const rad = Rs * (1.005 + t * (0.25 + f * 0.75));
+    d.add(t < 0.22 ? 2 : t < 0.5 ? 3 : 1, Math.cos(a) * rad, Math.sin(a) * rad, (0.55 + r() * r() * 0.9 * (1 - t)) * u);
+  }
+  /* The surface: boiling cells, dark spots with soft edges, a limb that darkens. */
+  const surf = makeSurface('continents', mulberry(s.seed * 2654435761 + 757));
+  const spots = Array.from({ length: 7 }, () => {
+    const a = q() * TAU, dd = Math.sqrt(q()) * 0.78;
+    return { x: Math.cos(a) * dd, y: Math.sin(a) * dd, r: 0.03 + q() * 0.07 };
+  });
+  grainDisc(d, r, 0, 0, Rs, u, {
+    dens: 0.95, shade: 0, big: 0.75,
+    value: (x, y) => {
+      for (const o of spots) {
+        const m = Math.hypot(x - o.x, (y - o.y) * 1.25) / o.r;
+        if (m < 1.5) return m < 1 ? 0.08 : 0.5;
+      }
+      return 1;
+    },
+    colour: (x, y, l, rr) => {
+      const limb = Math.hypot(x, y);
+      if (rr() < limb * limb * 0.55) return 4;
+      return surf.field(x * 2.2, y * 2.2) > 0 ? 3 : 2;
+    },
+  });
+  /* Any other suns hang in the sky. */
+  let oa = q() * TAU;
+  for (const other of s.suns) {
+    if (other === sun) continue;
+    const dist = Rs * 1.75, rad = Math.max(7 * k, Rs * 0.13);
+    const col = other.tint === pal.ink ? 0 : 2;
+    grainDisc(d, r, Math.cos(oa) * dist, Math.sin(oa) * dist, rad, u, { dens: 0.9, shade: 0, big: 0.5, colour: () => col });
+    oa += 1.7;
+  }
+  /* A far-reaching civilisation builds collectors around its star, stippled like everything else. */
+  const c = s.civState;
+  const rr = Rs * 1.38;
+  const hasCollectors = !c || (c.reach >= 2 && c.status !== 'silent');
+  if (hasCollectors) {
+    for (let i = 0; i < 28; i++) {
+      const a = (i / 28) * TAU, ca = Math.cos(a), sa = Math.sin(a);
+      grainBar(d, r, ca * (rr - 6 * k), sa * (rr - 6 * k), ca * (rr + 6 * k), sa * (rr + 6 * k), 4 * k, u, { dens: 2.6 });
+    }
+    grainBand(d, r, 0, 0, rr - 0.5 * k, rr + 0.5 * k, u, { dens: 2, fall: 1, big: 0, colour: () => 1 });
+  }
+  d.flush(g, 0.8 * u);
+  if (hasCollectors) glyphWord(g, s, r, rr + 12 * k, 0, 4, k, pal.ink);
+  const proms = Array.from({ length: 13 }, () => {
+    const pts = Array.from({ length: 70 }, () => ({ t: q(), jx: (q() - 0.5) * 7 * k, jy: (q() - 0.5) * 7 * k, s: (0.5 + q() * q() * 1.3) * k }));
+    return { a: q() * TAU, w: 0.06 + q() * 0.22, h: 0.09 + q() * 0.26, sp: 0.1 + q() * 0.32, ph: q() * TAU, pts };
+  });
+  return {
+    R, mx: 0, my: 0, spin: 0, tw: [], k, ...emptyTraffic(),
+    liveDraw(t) {
+      /* Prominences are clouds of grain lifting off the surface and falling back. */
+      for (const m of proms) {
+        const pulse = 0.5 + 0.5 * Math.sin(t * m.sp + m.ph);
+        const a0 = m.a - m.w, a1 = m.a + m.w, h = Rs * (1 + m.h * pulse) * 1.35;
+        const x0 = Math.cos(a0) * Rs, y0 = Math.sin(a0) * Rs, x1 = Math.cos(a1) * Rs, y1 = Math.sin(a1) * Rs;
+        const cx = Math.cos(m.a) * h, cy = Math.sin(m.a) * h;
+        ctx.fillStyle = alpha(tint, 0.3 + pulse * 0.7);
+        ctx.beginPath();
+        for (const p of m.pts) {
+          const v = 1 - p.t, x = v * v * x0 + 2 * v * p.t * cx + p.t * p.t * x1 + p.jx, y = v * v * y0 + 2 * v * p.t * cy + p.t * p.t * y1 + p.jy;
+          ctx.moveTo(x + p.s, y);
+          ctx.arc(x, y, p.s, 0, TAU);
+        }
+        ctx.fill();
+      }
+    },
+  };
+}
+
+function buildMoon(s) {
+  const b = plateBase(s, 257);
+  const { g, r, u, k, min, R } = b, { pal } = s;
+  const m = s.focus.ref, parent = m.parent, Rm = min * 0.3;
+  const q = mulberry(s.seed * 2654435761 + 769 + m.index * 11 + parent.i * 101);
+  const surf = makeSurface(q() < 0.3 ? 'ice' : 'barren', q);
+  const la = q() * TAU, lx = Math.cos(la), ly = Math.sin(la);
+  const pa = la + 2.3, pd = min * 1.02, Rp = min * 0.72, px0 = Math.cos(pa) * pd, py0 = Math.sin(pa) * pd;
+  const d = dotBuckets([pal.ink, pal.ink2, pal.accent]);
+  starfield(b, s, d, (x, y) => Math.hypot(x, y) < Rm * 1.02 || Math.hypot(x - px0, y - py0) < Rp);
+  /* Its world fills the sky, its dark side simply running out of dots. */
+  const field = (parent.surfaceFn || makeSurface(parent.surface, q)).field;
+  grainDisc(d, r, px0, py0, Rp, u, {
+    dens: 0.62, lx, ly, shade: 1, big: 0.55,
+    value: (x, y) => (field(x, y) > 0 ? 1 : 0.28),
+    colour: (x, y) => (field(x, y) > 0 ? 0 : 1),
+  });
+  /* The moon's own ground, with craters and rays. */
+  grainDisc(d, r, 0, 0, Rm, u, {
+    dens: 0.85, shade: 0, big: 0.7,
+    value: (x, y) => (surf.field(x, y) + gauss(r) * 0.2 > 0 ? 1 : 0.34),
+    colour: (x, y) => (surf.field(x, y) > 0 ? 0 : 1),
+  });
+  const lights = [];
+  const lanes = [], gates = [];
+  const peopled = m.colonised && parent.living;
+  const sites = [];
+  if (peopled) {
+    for (let i = 0, c = 5 + Math.floor(q() * 7); i < c; i++) {
+      const a = q() * TAU, dd = Math.sqrt(q()) * Rm * 0.82;
+      sites.push({ x: Math.cos(a) * dd, y: Math.sin(a) * dd, r: (5 + q() * 11) * k });
+    }
+    /* Roads, as lines of grain between the domes. */
+    sites.forEach((o, i) => { if (i) grainBar(d, r, sites[i - 1].x, sites[i - 1].y, o.x, o.y, 2.2 * k, u, { dens: 0.8, colour: 1 }); });
+  }
+  d.flush(g, 0.8 * u);
+  if (peopled) {
+    for (const o of sites) {
+      /* A clearing, then a stippled dome catching the light. */
+      g.fillStyle = pal.paper;
+      g.beginPath(); g.arc(o.x, o.y, o.r + 1.5 * k, 0, TAU); g.fill();
+      const dome = dotBuckets([pal.accent, pal.ink]);
+      grainDisc(dome, r, o.x, o.y, o.r, u, { dens: 0.8, lx, ly, shade: 0.85, big: 0.35, colour: () => 0 });
+      grainBand(dome, r, o.x, o.y, o.r * 0.95, o.r * 1.04, u, { dens: 1.6, fall: 1, big: 0.2, colour: () => 0 });
+      dome.flush(g, 0.8 * u);
+      for (let n = 0; n < 16; n++) {
+        const a = q() * TAU, dd = Math.sqrt(q()) * o.r * 1.6;
+        lights.push(o.x + Math.cos(a) * dd, o.y + Math.sin(a) * dd, (0.6 + q() * 0.6) * u);
+      }
+    }
+    glyphWord(g, s, r, Rm + 14 * k, 0, 4, k, pal.accent);
+    const dock = { x: Math.cos(pa) * Rm, y: Math.sin(pa) * Rm, r: 3.4 * k, kind: 'port' };
+    gates.push(dock);
+    lanes.push(makeLane(q, { x: px0, y: py0 }, dock, 3, 26, true));
+    lanes.push(...outsideShipLanes(q, b, dock, 1, 34, false));
+  } else {
+    glyphWord(g, s, r, Rm + 14 * k, 0, 3, k, pal.ink);
+  }
+  return {
+    R, mx: 0, my: 0, spin: 0, tw: [], k, lanes, gates, comms: { ftl: [], radio: [] }, moons: [],
+    world: { Rw: Rm, lights, base: la, count: lights.length / 3, dither: g.__ops ? grainNight(s, Rm, q) : null },
+  };
+}
+
+function buildGateClose(s) {
+  const b = plateBase(s, 263);
+  const { g, r, u, k, min, R } = b, { pal } = s;
+  const gate = s.focus.ref, Rg = min * 0.31, worm = gate.kind === 'wormhole';
+  const q = mulberry(s.seed * 2654435761 + 773);
+  const d = dotBuckets([pal.ink, pal.ink2, pal.accent]);
+  starfield(b, s, d, (x, y) => Math.hypot(x, y) < Rg * (worm ? 1.1 : 0.98));
+  if (worm) {
+    /* Three arms with hard leading edges, thinning behind, like everything else here. */
+    const armN = (Rg / u) * (Rg / u) * 5.5;
+    for (let i = 0; i < armN; i++) {
+      const t = Math.pow(r(), 0.8), arm = Math.floor(r() * 3), behind = Math.pow(r(), 2.4);
+      if (r() > 0.55 + 0.45 * Math.sin(t * 34 + arm * 2)) continue;
+      const a = (arm / 3) * TAU + Math.log(0.08 + t) * 3.4 - behind * (0.9 + (1 - t) * 0.5);
+      const rad = Rg * (0.1 + t * 1.25);
+      const near = 1 - behind;
+      d.add(r() < 0.025 ? 2 : r() < 0.1 + 0.85 * near ? 0 : 1, Math.cos(a) * rad, Math.sin(a) * rad, (0.55 + r() * r() * near * (1.3 - t * 0.6)) * u);
+    }
+    grainBand(d, r, 0, 0, Rg * 0.1, Rg * 0.2, u, { dens: 1.8, fall: 2.6, big: 0.9, colour: t => (t < 0.5 ? 2 : 0) });
+  } else {
+    /* A ring built out of grain: heavy hull bands, a truss between them, and pylons. */
+    grainBand(d, r, 0, 0, Rg, Rg * 0.955, u, { dens: 1.5, fall: 1.7, big: 0.7 });
+    grainBand(d, r, 0, 0, Rg * 0.84, Rg * 0.885, u, { dens: 1.5, fall: 1.7, big: 0.7 });
+    for (let i = 0, n = 72; i < n; i++) {
+      const a = (i / n) * TAU, a2 = ((i + 1) / n) * TAU, m0 = i % 2 ? 0.965 : 0.875, m1 = i % 2 ? 0.875 : 0.965;
+      grainBar(d, r, Math.cos(a) * Rg * m0, Math.sin(a) * Rg * m0, Math.cos(a2) * Rg * m1, Math.sin(a2) * Rg * m1, 1.8 * k, u, { dens: 0.75, colour: 1 });
+    }
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * TAU, ca = Math.cos(a), sa = Math.sin(a);
+      grainBar(d, r, ca * Rg, sa * Rg, ca * Rg * 1.2, sa * Rg * 1.2, 5 * k, u, { dens: 1 });
+      grainDisc(d, r, ca * Rg * 1.22, sa * Rg * 1.22, 6 * k, u, { dens: 1, shade: 0, big: 0.5, colour: () => 2 });
+    }
+    /* A faint haze of whatever the ring holds open. */
+    grainBand(d, r, 0, 0, Rg * 0.6, 0, u, { dens: 0.1, fall: 1, big: 0.2, colour: () => 1 });
+  }
+  d.flush(g, 0.8 * u);
+  if (worm) {
+    g.fillStyle = '#030303';
+    g.beginPath(); g.arc(0, 0, Rg * 0.1, 0, TAU); g.fill();
+  }
+  glyphWord(g, s, r, Rg * 1.3, Rg * 0.1, 4, k, pal.accent);
+  const centre = { x: 0, y: 0 };
+  const lanes = outsideShipLanes(q, b, centre, 3 + Math.floor(q() * 3), 24, true);
+  const swirl = Array.from({ length: 260 }, () => ({ a: q() * TAU, t: q(), sp: 0.04 + q() * 0.06, s: (0.5 + q() * 0.9) * k, hot: q() < 0.15 }));
+  /* The collar turns as one piece of stippled metal. */
+  const collar = worm || !g.__ops ? null : grainSprite(s, Rg * 0.8, (cg, cu) => {
+    const cd = dotBuckets([pal.accent, pal.ink]);
+    const cq = mulberry(s.seed * 2654435761 + 777);
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * TAU;
+      grainBand(cd, cq, 0, 0, Rg * 0.75, Rg * 0.69, cu, { from: a, to: a + 0.42, dens: 1.1, fall: 1.5, big: 0.8, colour: t => (t < 0.7 ? 0 : 1) });
+    }
+    cd.flush(cg, 0.8 * cu);
+  });
+  const motes = Array.from({ length: 200 }, () => ({ a: q() * TAU, off: q(), s: (0.5 + q() * 0.7) * k }));
+  return {
+    R, mx: 0, my: 0, spin: 0, tw: [], k, lanes, gates: [], comms: { ftl: [], radio: [] },
+    liveDraw(t) {
+      if (worm) {
+        for (const hot of [false, true]) {
+          ctx.fillStyle = hot ? pal.accent : pal.ink;
+          ctx.beginPath();
+          for (const m of swirl) {
+            if (m.hot !== hot) continue;
+            const f = 1 - ((m.t + t * m.sp) % 1), rad = Rg * (0.1 + f * 1.25), a = m.a + Math.log(0.08 + f) * 3.4;
+            ctx.moveTo(Math.cos(a) * rad + m.s, Math.sin(a) * rad);
+            ctx.arc(Math.cos(a) * rad, Math.sin(a) * rad, m.s, 0, TAU);
+          }
+          ctx.fill();
+        }
+        return;
+      }
+      drawSprite(collar, t * 0.12);
+      /* The field inside drifts inward as grain, not as lines. */
+      ctx.fillStyle = alpha(pal.accent, 0.8);
+      ctx.beginPath();
+      for (const m of motes) {
+        const u0 = (t * 0.07 + m.off) % 1, rad = Rg * 0.66 * (1 - u0), sz = m.s * (0.3 + u0);
+        ctx.moveTo(Math.cos(m.a) * rad + sz, Math.sin(m.a) * rad);
+        ctx.arc(Math.cos(m.a) * rad, Math.sin(m.a) * rad, sz, 0, TAU);
+      }
+      ctx.fill();
+    },
+  };
+}
+
+function buildStation(s) {
+  const b = plateBase(s, 269);
+  const { g, r, u, k, min, R } = b, { pal } = s;
+  const f = s.focus.ref, Rr = min * 0.27, style = f.style;
+  const hub = s.worlds[s.homeIdx];
+  const q = mulberry(s.seed * 2654435761 + 787 + f.ph * 1000);
+  const d = dotBuckets([pal.ink, pal.ink2, pal.accent]);
+  starfield(b, s, d, (x, y) => Math.hypot(x, y) < Rr * 1.02);
+  /* The nearest world's limb sweeps across the bottom of the view, thick at its edge. */
+  const Rp = min * 1.05, py0 = min * 1.42;
+  const surf = hub.surfaceFn || makeSurface(hub.surface, q);
+  for (let i = 0, n = (Rp / u) * (Rp / u) * 1.6; i < n; i++) {
+    const a = r() * TAU, t = Math.sqrt(r()), x = Math.cos(a) * t * Rp, y = Math.sin(a) * t * Rp;
+    if (y > -Rp * 0.4) continue;
+    const land = surf.field(x / Rp, y / Rp) > 0;
+    const limb = smooth(0.94, 1, t);
+    if (r() > (land ? 0.8 : 0.14) + limb * 0.8) continue;
+    d.add(land || limb > 0.5 ? 0 : 1, x, py0 + y, (0.55 + r() * r() * 0.6) * u);
+  }
+  /* Solar wings: panels of fine grain on a lattice, with a spine. */
+  const panelW = 24 * k, panelH = 66 * k;
+  for (const sign of [-1, 1]) {
+    for (let i = 0; i < 4; i++) {
+      const cx = sign * (Rr * 1.14 + i * (panelW + 4 * k));
+      for (let n = 0, c = (panelW * panelH) / (u * u) * 0.55; n < c; n++) {
+        const x = (r() - 0.5) * panelW, y = (r() - 0.5) * panelH;
+        const onGrid = Math.abs(((y / panelH) * 6) % 1) < 0.14 || Math.abs(((x / panelW) * 3) % 1) < 0.12;
+        d.add(onGrid ? 0 : r() < 0.82 ? 1 : 0, cx + x, y, (0.5 + r() * 0.35) * u);
+      }
+      grainBar(d, r, cx - panelW / 2, -panelH / 2, cx + panelW / 2, -panelH / 2, 1.6 * k, u, { dens: 1.2 });
+      grainBar(d, r, cx - panelW / 2, panelH / 2, cx + panelW / 2, panelH / 2, 1.6 * k, u, { dens: 1.2 });
+    }
+    grainBar(d, r, sign * Rr, 0, sign * (Rr * 1.14 + 3.5 * (panelW + 4 * k)), 0, 3.4 * k, u, { dens: 1.2 });
+  }
+  d.flush(g, 0.8 * u);
+  glyphWord(g, s, r, -Rr * 0.5, -Rr * 1.22, 6, k, pal.accent);
+  const dockA = { x: Math.cos(0.6) * Rr, y: -Math.sin(0.6) * Rr, r: 3.4 * k, kind: 'port' };
+  const dockB = { x: -Math.cos(0.9) * Rr, y: -Math.sin(0.9) * Rr, r: 3.4 * k, kind: 'port' };
+  const lanes = [...outsideShipLanes(q, b, dockA, 2, 26, true), ...outsideShipLanes(q, b, dockB, 2, 30, false)];
+  const spokes = style === 2 ? 3 : style === 1 ? 4 : 6;
+  /* The habitat, stippled once and then simply turned. */
+  const habitat = !g.__ops ? null : grainSprite(s, Rr * 1.03, (hg, hu) => {
+    const hq = mulberry(s.seed * 2654435761 + 791 + f.ph * 1000);
+    hg.fillStyle = pal.paper;
+    hg.beginPath(); hg.arc(0, 0, Rr, 0, TAU); hg.fill();
+    const hd = dotBuckets([pal.ink, pal.ink2, pal.accent]);
+    /* Faint stars still show through the open wheel. */
+    for (let i = 0, n = (Rr / hu) * (Rr / hu) * 0.12; i < n; i++) {
+      const a = hq() * TAU, t = Math.sqrt(hq()) * Rr;
+      hd.add(1, Math.cos(a) * t, Math.sin(a) * t, (0.5 + hq() * 0.3) * hu);
+    }
+    /* Outer hull, hard on the outside and thinning in, with the lit deck inside it. */
+    grainBand(hd, hq, 0, 0, Rr, Rr * 0.85, hu, { dens: 1.05, fall: 1.7, big: 0.7, colour: t => (t < 0.55 ? 0 : 1) });
+    grainBand(hd, hq, 0, 0, Rr * 0.85, Rr * 0.82, hu, { dens: 1.1, fall: 1, big: 0.3, colour: () => 0 });
+    if (style === 1) grainBand(hd, hq, 0, 0, Rr * 0.54, Rr * 0.47, hu, { dens: 1.1, fall: 1.4, big: 0.6 });
+    for (let i = 0; i < spokes; i++) {
+      const a = (i / spokes) * TAU;
+      grainBar(hd, hq, Math.cos(a) * Rr * 0.2, Math.sin(a) * Rr * 0.2, Math.cos(a) * Rr * 0.84, Math.sin(a) * Rr * 0.84, 5 * k, hu, { dens: 0.85 });
+    }
+    grainDisc(hd, hq, 0, 0, Rr * 0.2, hu, { dens: 0.9, lx: 0.6, ly: -0.8, shade: 0.8, big: 0.7 });
+    grainDisc(hd, hq, 0, 0, Rr * 0.07, hu, { dens: 1.3, shade: 0, big: 0.6, colour: () => 2 });
+    /* Windows, as clusters of warm grain. */
+    for (let i = 0; i < 96; i++) {
+      if ((i * 7) % 5 === 0) continue;
+      const a = (i / 96) * TAU, rad = Rr * 0.93;
+      grainDisc(hd, hq, Math.cos(a) * rad, Math.sin(a) * rad, 2.6 * k, hu, { dens: 1.3, shade: 0, big: 0.4, colour: () => 2 });
+    }
+    hd.flush(hg, 0.8 * hu);
+  });
+  return {
+    R, mx: 0, my: 0, spin: 0, tw: [], k, lanes, gates: [dockA, dockB], comms: { ftl: [], radio: [] },
+    liveDraw(t) { drawSprite(habitat, t * f.spin * 0.4); },
+  };
+}
+
+function buildAsteroid(s) {
+  const b = plateBase(s, 271);
+  const { g, r, u, k, min, R } = b, { pal } = s;
+  const f = s.focus.ref, Ra = min * 0.27;
+  const q = mulberry(s.seed * 2654435761 + 797 + f.ph * 1000);
+  const lobes = [q() * TAU, q() * TAU, q() * TAU];
+  const edge = a => Ra * (0.82 + 0.16 * Math.sin(a * 2 + lobes[0]) + 0.08 * Math.sin(a * 5 + lobes[1]) + 0.04 * Math.sin(a * 11 + lobes[2]));
+  const la = q() * TAU, lx = Math.cos(la), ly = Math.sin(la);
+  const d = dotBuckets([pal.ink, pal.ink2, pal.accent]);
+  starfield(b, s, d, (x, y) => Math.hypot(x, y) < edge(Math.atan2(y, x)) * 1.02);
+  /* Its neighbours in the belt, each a little shaded lump of grain. */
+  for (let i = 0; i < 26; i++) {
+    const a = q() * TAU, dist = Ra * (1.25 + q() * 1.7), sz = (2 + q() * q() * 20) * k;
+    const x0 = Math.cos(a) * dist, y0 = Math.sin(a) * dist * 0.5;
+    const wob = q() * TAU;
+    grainDisc(d, r, x0, y0, sz, u, { dens: 0.9, lx, ly, shade: 1, big: 0.5, value: (x, y) => (Math.hypot(x, y) < 0.75 + 0.25 * Math.sin(Math.atan2(y, x) * 3 + wob) ? 1 : 0) });
+  }
+  /* The rock: lit one side, grain running out into shadow, with a crisp silhouette. */
+  const surf = makeSurface('barren', q);
+  for (let i = 0, n = (Ra / u) * (Ra / u) * 3; i < n; i++) {
+    const x = (r() * 2 - 1) * Ra * 1.08, y = (r() * 2 - 1) * Ra * 1.08;
+    const a = Math.atan2(y, x), lim = edge(a), t = Math.hypot(x, y) / lim;
+    if (t > 1) continue;
+    const lit = clamp(0.5 + ((x / Ra) * lx + (y / Ra) * ly) * 0.85, 0.03, 1);
+    const h = surf.field(x / Ra, y / Ra) + gauss(r) * 0.25;
+    const rim = smooth(0.95, 1, t) * 0.55;
+    if (r() > (h > 0 ? 0.95 : 0.34) * lit + rim) continue;
+    d.add(h > 0 || rim > 0.3 ? 0 : 1, x, y, (0.55 + r() * r() * 0.95 * (0.3 + lit)) * u);
+  }
+  /* Drill rigs on the rim. */
+  const rigs = [];
+  for (let i = 0; i < 5; i++) {
+    const a = q() * TAU, dd = edge(a), h = (16 + q() * 20) * k, ca = Math.cos(a), sa = Math.sin(a);
+    grainBar(d, r, ca * dd, sa * dd, ca * (dd + h), sa * (dd + h), 3 * k, u, { dens: 1.1 });
+    grainBar(d, r, ca * (dd + h * 0.7) - sa * 6 * k, sa * (dd + h * 0.7) + ca * 6 * k, ca * (dd + h * 0.7) + sa * 6 * k, sa * (dd + h * 0.7) - ca * 6 * k, 2 * k, u, { dens: 1 });
+    rigs.push({ x: ca * (dd + h), y: sa * (dd + h) });
+  }
+  d.flush(g, 0.8 * u);
+  /* The settlement: stippled domes in cleared ground. */
+  for (let i = 0, c = 5 + Math.floor(q() * 6); i < c; i++) {
+    const a = q() * TAU, dd = Math.sqrt(q()) * Ra * 0.62, x = Math.cos(a) * dd, y = Math.sin(a) * dd, rad = (5 + q() * 12) * k;
+    g.fillStyle = pal.paper;
+    g.beginPath(); g.arc(x, y, rad + 1.5 * k, 0, TAU); g.fill();
+    const dome = dotBuckets([pal.accent]);
+    grainDisc(dome, r, x, y, rad, u, { dens: 0.8, lx, ly, shade: 0.85, big: 0.35, colour: () => 0 });
+    grainBand(dome, r, x, y, rad * 0.95, rad * 1.04, u, { dens: 1.6, fall: 1, big: 0.2, colour: () => 0 });
+    dome.flush(g, 0.8 * u);
+  }
+  glyphWord(g, s, r, Ra * 1.1, -Ra * 0.9, 4, k, pal.accent);
+  const dock = { x: rigs[0].x, y: rigs[0].y, r: 3.4 * k, kind: 'port' };
+  const lanes = outsideShipLanes(q, b, dock, 3, 28, true);
+  /* Sparks from the drills. */
+  const sparks = rigs.flatMap((o, i) => Array.from({ length: 14 }, () => ({ o, i, a: q() * TAU, d: q(), s: (0.5 + q() * 0.7) * k })));
+  return {
+    R, mx: 0, my: 0, spin: 0, tw: [], k, lanes, gates: [dock], comms: { ftl: [], radio: [] },
+    liveDraw(t) {
+      ctx.fillStyle = pal.accent;
+      ctx.beginPath();
+      for (const p of sparks) {
+        if (Math.sin(t * 1.3 + p.i * 2) < 0.1) continue;
+        const rad = ((t * 0.4 + p.d) % 1) * 11 * k;
+        const x = p.o.x + Math.cos(p.a) * rad, y = p.o.y + Math.sin(p.a) * rad;
+        ctx.moveTo(x + p.s, y);
+        ctx.arc(x, y, p.s, 0, TAU);
+      }
+      ctx.fill();
+    },
+  };
+}
+
+function buildCloseup(s) {
+  const kind = s.focus.kind;
+  if (kind === 'blackhole') return buildBlackHole(s);
+  if (kind === 'star') return buildStar(s);
+  if (kind === 'moon') return buildMoon(s);
+  if (kind === 'gate' || kind === 'wormhole') return buildGateClose(s);
+  if (kind === 'station') return buildStation(s);
+  if (kind === 'asteroid') return buildAsteroid(s);
+  return buildWorld(s);
+}
+
+/* What the camera could visit right now: only things that exist, and that the chart can show. */
+function focusOptions(s) {
+  const out = [];
+  const hub = s.worlds[s.homeIdx];
+  const inView = (x, y) => x > 30 && y > 30 && x < s.W - 30 && y < s.H - 30;
+  const t = lastCamT;
+  const P2 = [0, 0];
+  const worldPos = o => { orbitXY(o.a, o.e, o.w, (t / o.T) * TAU + o.phase, P2); place(s, P2[0], P2[1]); return [VX, VY]; };
+  out.push({ id: 'home', kind: 'world', ref: hub, label: 'Home world', weight: 2 });
+  for (const o of s.worlds) {
+    if (o === hub || o.r < 5 * s.px) continue;
+    const [x, y] = worldPos(o);
+    if (inView(x, y)) out.push({ id: 'world' + o.i, kind: 'world', ref: o, label: o.living ? 'Sister world' : 'World', weight: o.living ? 1.6 : 1 });
+  }
+  for (const o of s.worlds) {
+    const [x, y] = worldPos(o);
+    if (!inView(x, y)) continue;
+    o.moons.forEach((m, i) => out.push({ id: `moon${o.i}.${i}`, kind: 'moon', ref: m, label: m.colonised && o.living ? 'Colonised moon' : 'Moon', weight: m.colonised && o.living ? 1.5 : 0.6 }));
+  }
+  s.suns.forEach((sun, i) => {
+    const a = (t / s.sunT) * TAU * sun.rate + sun.ph;
+    place(s, Math.cos(a) * sun.off, Math.sin(a) * sun.off);
+    if (inView(VX, VY)) out.push({ id: 'star' + i, kind: 'star', ref: sun, label: 'Star', weight: 1.4 });
+  });
+  for (const g of s.gatesNow || s.gates) {
+    place(s, g.gx, g.gy);
+    if (inView(VX, VY)) out.push({ id: 'gate' + s.gates.indexOf(g), kind: g.kind, ref: g, label: g.kind === 'wormhole' ? 'Wormhole' : 'Ring gate', weight: 1.6 });
+  }
+  for (const f of s.features) {
+    if (!f.open) continue;
+    featurePos(s, f, t);
+    if (inView(f.x, f.y)) out.push({ id: f.id, kind: f.kind, ref: f, label: { station: 'Space station', asteroid: 'Occupied asteroid', blackhole: 'Black hole' }[f.kind], weight: f.kind === 'blackhole' ? 2.4 : 1.5 });
+  }
+  return out;
+}
+function chooseFocus(s) {
+  const all = focusOptions(s).filter(f => f.id !== s.lastFocusId);
+  let total = 0;
+  for (const f of all) total += f.weight;
+  let pick = Math.random() * total;
+  for (const f of all) { pick -= f.weight; if (pick <= 0) return f; }
+  return all[all.length - 1];
+}
+function setFocus(s, f) {
+  s.focus = f;
+  s.plates = s.plates || {};
+  s.plates[-1] = s.closeups[f.id];
+  s.lastFocusId = f.id;
+}
+/* Paint the next destination while the camera rests, so the journey itself never stalls. */
+function prepareFocus(s) {
+  if (s !== sys || !s.ready || cam.z < 0 || s.focusReady) return;
+  setFocus(s, chooseFocus(s));
+  /* Two short steps rather than one long one, so a resting wallpaper barely notices. */
+  plateDisc(s, -1);
+  const f = s.focus;
+  setTimeout(() => {
+    if (s !== sys || s.focus !== f) return;
+    plate(s, -1);
+    s.focusReady = true;
+  }, 400);
+}
+function focusPosition(s, t) {
+  const f = s.focus, r = f.ref, P2 = [0, 0];
+  switch (f.kind) {
+    case 'world':
+      orbitXY(r.a, r.e, r.w, (t / r.T) * TAU + r.phase, P2);
+      place(s, P2[0], P2[1]);
+      break;
+    case 'moon': {
+      const o = r.parent;
+      orbitXY(o.a, o.e, o.w, (t / o.T) * TAU + o.phase, P2);
+      place(s, P2[0], P2[1]);
+      const a = (t / r.T) * TAU + r.ph;
+      VX += Math.cos(a) * r.d; VY += Math.sin(a) * r.d;
+      break;
+    }
+    case 'star': {
+      const a = (t / s.sunT) * TAU * r.rate + r.ph;
+      place(s, Math.cos(a) * r.off, Math.sin(a) * r.off);
+      break;
+    }
+    case 'gate': case 'wormhole':
+      place(s, r.gx, r.gy);
+      break;
+    default:
+      featurePos(s, r, t);
+  }
+  return [VX, VY];
 }
 
 function buildNeighbourhood(s) {
@@ -2264,10 +2999,16 @@ function buildSupercluster(s) {
   return { R, mx: home.x, my: home.y, spin: 0, k, lanes, gates, comms, tw: twinkles(r, Math.min(nodes.length, 60), () => { const o = nodes[i++]; return [o.x, o.y, 0]; }) };
 }
 
-const BUILDERS = { '-1': buildWorld, 1: buildNeighbourhood, 2: buildGalaxy, 3: buildGroup, 4: buildSupercluster };
+const BUILDERS = { '-1': buildCloseup, 1: buildNeighbourhood, 2: buildGalaxy, 3: buildGroup, 4: buildSupercluster };
 function galaxyRadius(s) {
   const min = Math.min(s.W, s.H), max = Math.max(s.W, s.H), R = Math.hypot(s.W, s.H) * 0.55;
   return Math.min(R * 0.92, Math.max(min * 0.47, max * 0.34));
+}
+/* Close-ups are big, so only the home world and the last few stay in memory. */
+function rememberCloseup(s, meta) {
+  s.closeups[s.focus.id] = meta;
+  const ids = Object.keys(s.closeups).filter(id => id !== 'home' && id !== s.focus.id);
+  while (ids.length > (LITE ? 0 : 2)) delete s.closeups[ids.shift()];
 }
 function plateDisc(s, level) {
   s.plates = s.plates || {};
@@ -2283,6 +3024,7 @@ function plateDisc(s, level) {
   meta.level = level;
   meta.sunX = 1; meta.sunY = 0;
   s.plates[level] = meta;
+  if (level === -1) rememberCloseup(s, meta);
   if (s.civState) applyPlateCiv(s, meta);
   return meta;
 }
@@ -2309,8 +3051,7 @@ function plate(s, level) {
 function anchorOf(s, level, t, going) {
   if (level === 0) {
     if (going === 'out') { place(s, 0, 0); return [lerp(s.cx, s.W / 2, cam.k), lerp(s.cy, s.H / 2, cam.k)]; }
-    place(s, s.hx, s.hy);
-    return [VX, VY];
+    return focusPosition(s, t);
   }
   const p = plateDisc(s, level);
   const a = p.spin * t, c = Math.cos(a), sn = Math.sin(a);
@@ -2370,10 +3111,12 @@ function drawLive(s, t, alpha01, scale) {
     for (const g of s.gates) { place(s, g.gx, g.gy); g.x = VX; g.y = VY; }
     for (const g of s.ports) { place(s, g.gx, g.gy); g.x = VX; g.y = VY; }
     const lanesNow = s.lanesNow || s.lanes, gatesNow = s.gatesNow || s.gates, portsNow = s.portsNow || s.ports;
+    for (const f of s.features) featurePos(s, f, t);
     drawComms(s.commsNow || s.comms, t, Math.max(scale, 1), s.pal, tk);
     drawLanes(lanesNow, t, Math.max(scale, 1), s.pal, tk, fleetOf(s), scale);
     const thin = Math.pow(Math.max(scale, 1), -0.6);
     for (const g of portsNow) drawGate(g, t, Math.max(scale, 1), s.pal, tk);
+    for (const f of s.features) if (f.open) drawFeature(s, f, t, thin, tk);
     for (const g of gatesNow) {
       drawGate(g, t, Math.max(scale, 1), s.pal, tk);
       ctx.strokeStyle = s.pal.accent;
@@ -2470,6 +3213,7 @@ function drawPlate(s, level, t, px, py, mx, my, scale, a01) {
   }
   ctx.globalAlpha = a01;
   if (p.world) drawNightSide(s, p, t, pal);
+  if (p.liveDraw) p.liveDraw(t, scale);
   /* Twinkles: stars, galaxies and city lights breathing very slightly. */
   for (const d of p.tw) {
     const b = 0.5 + 0.5 * Math.sin(t * d.sp + d.ph);
@@ -2521,13 +3265,14 @@ function drawNightSide(s, p, t, pal) {
   ctx.beginPath();
   ctx.arc(0, 0, Rw, 0, TAU);
   ctx.clip();
-  ctx.fillStyle = alpha(mix(pal.paper, pal.ink, 0.14), 0.93);
   ctx.beginPath();
   ctx.arc(sx, sy, Rw * 1.02, 0, TAU);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.arc(sx, sy, Rw * 1.02, 0, TAU);
+  if (!w.dither) {
+    ctx.fillStyle = alpha(mix(pal.paper, pal.ink, 0.14), 0.93);
+    ctx.fill();
+  }
   ctx.clip();
+  if (w.dither) ctx.drawImage(w.dither.c, -Rw, -Rw, Rw * 2, Rw * 2);
   const shown = p.lightsNow === undefined ? w.count : p.lightsNow;
   ctx.fillStyle = pal.accent;
   ctx.beginPath();
@@ -2575,6 +3320,16 @@ function render(t) {
 }
 
 /* The camera wanders on its own: a random scale, a slow journey, a random pause. */
+function goTo(f) {
+  const s = sys;
+  if (cam.z < 0) { cam.visitNext = f; cam.from = cam.z; cam.to = 0; cam.u = 0; cam.dur = 6; return; }
+  setFocus(s, f);
+  plate(s, -1);
+  s.focusReady = false;
+  cam.from = cam.z; cam.to = -1; cam.u = 0;
+  cam.dur = Math.max(pacing.jMin, 6);
+}
+let lastCamT = 0;
 function stepCam(dt) {
   if (cam.k !== cam.viewTo) {
     const d = dt / 1.8;
@@ -2587,6 +3342,8 @@ function stepCam(dt) {
     if (cam.u === 1) {
       cam.z = cam.to;
       cam.hold = (pacing.pMin + Math.random() * (pacing.pMax - pacing.pMin)) * (cam.to === 0 ? 1.6 : 1);
+      if (cam.to >= 0) { const s = sys; setTimeout(() => prepareFocus(s), 900); }
+      if (cam.visitNext) { const f = cam.visitNext; cam.visitNext = null; goTo(f); return; }
     }
     updateScale();
     return;
@@ -2598,7 +3355,14 @@ function stepCam(dt) {
   const choices = [];
   for (let l = LEVEL_MIN; l <= LEVEL_MAX; l++) if (l !== here) choices.push(l);
   /* Come home a little more often than chance, so the chart itself stays the main event. */
-  const target = here !== 0 && (swapDue() || Math.random() < 0.3) ? 0 : choices[Math.floor(Math.random() * choices.length)];
+  let target = here !== 0 && (swapDue() || Math.random() < 0.3) ? 0 : choices[Math.floor(Math.random() * choices.length)];
+  /* From the chart, visiting something in it is the most likely journey. */
+  if (here === 0 && Math.random() < 0.4) target = -1;
+  if (target === -1 && here >= 0) {
+    if (!sys.focusReady) setFocus(sys, chooseFocus(sys));
+    plate(sys, -1);
+    sys.focusReady = false;
+  }
   cam.from = cam.z;
   cam.to = target;
   cam.u = 0;
@@ -2608,12 +3372,14 @@ function stepCam(dt) {
 let shownLevel = null;
 function updateScale() {
   const l = clamp(Math.round(cam.z), LEVEL_MIN, LEVEL_MAX);
-  const key = l + ':' + cam.viewTo;
+  const key = l + ':' + cam.viewTo + ':' + sys.focus.id;
   if (key === shownLevel) return;
   shownLevel = key;
   const [name, size0] = LEVELS[l];
-  const size = l === -1 ? `about ${['6,000', '13,000', '30,000', '90,000'][sys.homeClass]} km across` : size0;
-  const label = l === 0 && cam.viewTo === 1 ? 'Home sky' : name;
+  const fk = sys.focus.kind;
+  const sizes = { station: 'about 3 km across', asteroid: 'about 40 km across', moon: 'about 3,000 km across', star: 'about 1.4 million km across', gate: 'about 12 km across', wormhole: 'about 5 km across', blackhole: 'about 60 km across' };
+  const size = l === -1 ? (sizes[fk] || `about ${['6,000', '13,000', '30,000', '90,000'][sys.homeClass]} km across`) : size0;
+  const label = l === -1 ? sys.focus.label : l === 0 && cam.viewTo === 1 ? 'Home sky' : name;
   document.getElementById('scale').textContent = `${label} · ${size}`;
 }
 
@@ -2654,6 +3420,7 @@ function loop(now) {
   if (swapDue() && cam.z === 0 && cam.u >= 1) swapSystem(newSeed());
   sound.bass *= 0.86; sound.level *= 0.9;
   lastT = spanInfo ? (Date.now() / 1000) * simSpeed : simT;
+  lastCamT = lastT;
   render(startAt + lastT);
   if (fade) {
     const left = 1 - (now - fade.at) / 3000;
@@ -2716,12 +3483,22 @@ function civHistory(seed, s, age) {
   const st = { people, homeName, gates: 0, settled: 0, reach: 0, vigor: 0.35, status: 'rising', events: [], age };
   const add = (d, kind, text) => { st.events.push({ d, kind, text }); if (st.events.length > 60) st.events.shift(); };
   add(0, 'founded', `${people} broadcast their first signal from ${homeName}.`);
+  const q2 = mulberry(seed * 2654435761 + 911), R2 = (a, b) => a + (b - a) * q2();
+  const stationAt = [R2(4, 10), R2(14, 30), R2(35, 70)];
+  const rockAt = [R2(8, 16), R2(18, 30), R2(32, 50), R2(55, 80), R2(85, 120)];
+  const moonAt = [R2(5, 12), R2(15, 28), R2(30, 50), R2(55, 90), R2(95, 140), R2(150, 200), R2(210, 280)];
+  const stationCount = s.features.filter(f => f.kind === 'station').length, rockCount = s.features.filter(f => f.kind === 'asteroid').length;
+  const homeMoons = s.worlds[s.homeIdx].moons.length;
+  st.stations = 0; st.rocks = 0; st.moons = 0;
   const steps = Math.min(16000, Math.floor(age * 4));
   for (let i = 1; i <= steps; i++) {
     const d = i / 4;
     /* Fixed draws every tick, so a longer history always starts with the same past. */
     const a = q(), b = q(), c = q(), e = q(), f = q(), g = q(), h = q();
     if (st.status !== 'silent') {
+      while (st.stations < stationCount && d >= stationAt[st.stations]) { st.stations++; add(d, 'station', st.stations === 1 ? 'Their first space station was finished.' : `Station ${st.stations} went into orbit.`); }
+      while (st.rocks < rockCount && d >= rockAt[st.rocks]) { st.rocks++; add(d, 'asteroid', st.rocks === 1 ? 'Miners settled the first asteroid.' : `Asteroid ${st.rocks} was occupied.`); }
+      while (st.moons < homeMoons && d >= moonAt[st.moons]) { st.moons++; add(d, 'moon', `Moon ${st.moons} of ${homeName} was colonised.`); }
       while (st.gates < s.gates.length && st.gates < gateAt.length && d >= gateAt[st.gates]) { st.gates++; add(d, 'gate', `Gate ${st.gates} opened.`); }
       while (st.settled < sisters.length && d >= settleAt[st.settled]) { add(d, 'settled', `${sisterNames[st.settled]} was settled.`); st.settled++; }
       while (st.reach < 4 && d >= reachAt[st.reach + 1] && st.vigor > 0.35) { st.reach++; add(d, 'reach', REACH[st.reach]); }
@@ -2764,7 +3541,7 @@ function applyPlateCiv(s, p) {
     ftl: silent ? [] : p.comms.ftl.filter(f => !isOff(f.a) && !isOff(f.b) && (L < 0 ? c.gates > 0 : c.reach >= L)),
     radio: silent ? [] : p.comms.radio,
   };
-  if (p.world) p.lightsNow = silent ? 0 : Math.floor(p.world.count * Math.pow(c.vigor, 1.5));
+  if (p.world) p.lightsNow = silent || (p.subject && p.subject.settled === false) ? 0 : Math.floor(p.world.count * Math.pow(c.vigor, 1.5));
 }
 
 function applyCiv(first) {
@@ -2785,9 +3562,19 @@ function applyCiv(first) {
     g.open = open;
   });
   s.gatesNow = s.gates.filter(g => g.open);
+  let stations = 0, rocks = 0;
+  for (const f of s.features) {
+    if (f.kind === 'station') f.open = stations++ < c.stations;
+    if (f.kind === 'asteroid') f.open = rocks++ < c.rocks;
+    if (f.kind !== 'blackhole') f.dead = silent;
+  }
+  hub.moons.forEach((m, i) => { m.colonised = i < c.moons; });
+  sisters.forEach(o => o.moons.forEach(m => { m.colonised = o.settled && c.moons > 1; }));
+  s.worlds.filter(o => !o.living).forEach(o => o.moons.forEach(m => { m.colonised = false; }));
   const reachable = e => {
     if (e.kind === 'port') e = e.world;
     if (s.gates.includes(e)) return e.open;
+    if (e.feature) return e.open;
     return !(e.living && e.settled === false);
   };
   s.lanesNow = silent ? [] : s.lanes.filter(l => reachable(l.from) && reachable(l.to));
@@ -3045,6 +3832,20 @@ if (wallpaper) {
       swapSystem(sys.seed);
     },
     record: recordClip,
+    visit(kind) {
+      const all = focusOptions(sys).filter(f => f.kind === kind || (kind === 'colonised' && f.kind === 'moon' && f.ref.colonised) || (kind === 'home' && f.id === 'home') || (kind === 'sister' && f.label === 'Sister world'));
+      if (!all.length) return false;
+      /* With random zoom off, it goes there and stays until you come back. */
+      if (!cam.auto && !frozen) { cam.auto = true; cam.stopAtChart = true; }
+      goTo(all[Math.floor(Math.random() * all.length)]);
+      return true;
+    },
+    chart() {
+      if (cam.z === 0) return;
+      if (!cam.auto && !frozen) { cam.auto = true; cam.stopAtChart = true; }
+      cam.from = cam.z; cam.to = 0; cam.u = 0; cam.dur = Math.max(pacing.jMin, 6);
+    },
+    options() { return JSON.stringify(focusOptions(sys).map(f => f.label)); },
     report: tellApp,
     history(age) { return JSON.stringify(civHistory(sys.seed, sys, age)); },
     state() {
@@ -3089,6 +3890,11 @@ function start(seed) {
   shownLevel = null;
   updateScale();
 
+  if (params.get('focus')) {
+    const want = params.get('focus');
+    const f = focusOptions(sys).find(o => o.kind === want || o.id === want);
+    if (f) setFocus(sys, f);
+  }
   render(startAt);
   if (!frozen) {
     startedAt = performance.now();

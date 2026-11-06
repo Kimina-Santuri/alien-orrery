@@ -426,6 +426,18 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         menu.addItem(chronicle)
         menu.addItem(.separator())
 
+        let zoomTo = NSMenuItem(title: "Zoom to", action: nil, keyEquivalent: "")
+        let places = NSMenu()
+        for (kind, label) in [("home", "Home world"), ("sister", "A sister world"), ("colonised", "A colonised moon"), ("moon", "A moon"), ("star", "A star"), ("gate", "A ring gate"), ("wormhole", "A wormhole"), ("station", "A space station"), ("asteroid", "An occupied asteroid"), ("blackhole", "A black hole")] {
+            let item = action(label, #selector(visit))
+            item.representedObject = kind
+            places.addItem(item)
+        }
+        places.addItem(.separator())
+        places.addItem(action("Back to the chart", #selector(backToChart)))
+        zoomTo.submenu = places
+        menu.addItem(zoomTo)
+        menu.addItem(.separator())
         menu.addItem(action("Discover another civilisation", #selector(discover), key: "n"))
         menu.addItem(action("Found a new one from nothing", #selector(foundNew)))
         menu.addItem(favouritesItem())
@@ -529,6 +541,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         defaults.set(d, forKey: "civ.\(wall.id)")
     }
 
+    @objc private func visit(_ sender: NSMenuItem) {
+        // Each display goes if it has one; a system without a black hole simply stays put.
+        toAll("orrery.visit('\(sender.representedObject as? String ?? "home")')")
+    }
+    @objc private func backToChart() { toAll("orrery.chart()") }
     @objc private func discover() {
         load(seed: Int.random(in: 1...99998), founded: isLiving ? nowMs() - Double.random(in: 30...90) * 86_400_000 : nil)
     }

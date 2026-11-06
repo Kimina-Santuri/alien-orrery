@@ -15,11 +15,12 @@ The app isn't signed by Apple, so macOS will stop it the first time. Open it onc
 **System Settings > Privacy & Security** and choose **Open Anyway**.
 
 It lives in the menu bar and draws behind your desktop icons. From the menu you can read the civilisation's chronicle,
-discover another, save favourites, change the view and colours, make it react to sound, and save images and videos.
+discover another, save favourites, change the view and colours, zoom to a star, moon, gate, wormhole, space station,
+occupied asteroid or black hole, make it react to sound, and save images and videos.
 By default it pauses on battery and in Low Power Mode; untick **Pause on battery** to keep it moving.
 
-Rough cost on an M1 Pro at 3600 x 2338: 13 to 33% of one CPU core when moving, about 0.1% when paused, and
-350 to 730 MB of memory.
+Rough cost on an M1 Pro at 3600 x 2338: 13 to 47% of one CPU core when moving, about 0.1% when paused, and
+330 to 730 MB of memory.
 
 Reacting to sound is off until you choose it. It asks macOS for microphone or screen and system audio permission, and only
 measures loudness. Nothing is recorded or sent anywhere.
