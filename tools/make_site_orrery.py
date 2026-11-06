@@ -34,7 +34,7 @@ sub("const frozen = params.has('still') || reduceMotion;", "const saveData = !!(
 sub("const wallpaper = params.has('wallpaper'); /* run by the Mac app: no controls, driven through window.orrery */", "const wallpaper = true; /* civilisations and stories on */")
 sub("  document.getElementById('scale').textContent = `${label} · ${size}`;\n", "  void label; void size;\n")
 # Enough worlds for every page; suns kept right or top, clear of the navigation.
-s = re.sub(r"  const n = kind === 'compact' \? (.*?);\n", lambda m: "  const n = Math.max(9, kind === 'compact' ? " + m.group(1) + ");\n", s, count=1)
+s = re.sub(r"  const n = kind === 'compact' \? (.*?);\n", lambda m: "  const n = Math.max(10, kind === 'compact' ? " + m.group(1) + ");\n", s, count=1)
 sub("  const nearStart = !landscape || r() < 0.5;\n", "  const coin0 = r();\n  void coin0;\n  const nearStart = !landscape;\n")
 sub("const shot = shotRoll < 0.5 ? 'edge' : shotRoll < 0.68 ? 'corner' : shotRoll < 0.86 ? 'inset' : 'beyond';", "const shot = shotRoll < 0.6 ? 'edge' : shotRoll < 0.8 ? 'corner' : 'beyond';")
 # Slower pacing on the site.
