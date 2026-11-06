@@ -15,7 +15,7 @@ private enum Key {
     static let pauseOnBattery = "pauseOnBattery", paused = "paused", favourites = "favourites"
     static let jMin = "journeyMin", jMax = "journeyMax", pMin = "pauseMin", pMax = "pauseMax"
     static let speed = "orbitSpeed", rate = "historyRate", dust = "dust", chronicle = "chronicle"
-    static let realTime = "realTime", span = "span", sound = "sound"
+    static let realTime = "realTime", span = "span", sound = "sound", eventLog = "eventLog", zoomEvents = "zoomEvents", clickWall = "clickWallpaper"
     static let useCustom = "useCustom", cPaper = "customPaper", cInk = "customInk", cInk2 = "customInk2", cAccent = "customAccent"
 }
 
@@ -23,6 +23,11 @@ struct Target {
     let frame: CGRect
     let id: String
     var span: (CGFloat, CGFloat, CGFloat, CGFloat)?
+}
+
+/// Answers the first click even if the window wasn't in front.
+final class ExploreWebView: WKWebView {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 final class Wallpaper: NSObject, WKNavigationDelegate {
@@ -223,9 +228,12 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
             Key.mode: "living", Key.view: "random", Key.palette: "", Key.zoom: true, Key.change: 300,
             Key.pauseOnBattery: true, Key.paused: false,
             Key.jMin: 8.0, Key.jMax: 15.0, Key.pMin: 8.0, Key.pMax: 18.0, Key.speed: 1.0, Key.rate: 1.0, Key.dust: 1.0,
-            Key.chronicle: true, Key.realTime: true, Key.span: false, Key.sound: "off", Key.useCustom: false,
+            Key.chronicle: true, Key.eventLog: true, Key.zoomEvents: true, Key.clickWall: true, Key.realTime: true, Key.span: false, Key.sound: "off", Key.useCustom: false,
             Key.cPaper: "#101418", Key.cInk: "#f2efe0", Key.cInk2: "#6f8df0", Key.cAccent: "#ff5c38",
         ])
+        NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            self?.desktopClick(at: NSEvent.mouseLocation, clicks: event.clickCount)
+        }
         html = Bundle.main.url(forResource: "orrery", withExtension: "html")
         guard html != nil else { NSLog("Orrery: orrery.html is missing from the app"); NSApp.terminate(nil); return }
 
@@ -362,6 +370,8 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         wall.run("orrery.setChange(\(isLiving || spanning ? 0 : defaults.integer(forKey: Key.change)))")
         applyTiming(wall)
         wall.run("orrery.setChronicle(\(defaults.bool(forKey: Key.chronicle)))")
+        wall.run("orrery.setEventLog(\(defaults.bool(forKey: Key.eventLog)))")
+        wall.run("orrery.setZoomToEvents(\(defaults.bool(forKey: Key.zoomEvents)))")
         wall.run("orrery.setRealTime(\(defaults.bool(forKey: Key.realTime)))")
         wall.run("orrery.setRate(\(defaults.double(forKey: Key.rate)))")
         wall.run("orrery.setPaused(\(shouldPause))")
@@ -745,6 +755,29 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
 
     // MARK: Settings window
 
+    /// True when nothing but the desktop is under this point (screen coordinates, origin bottom left).
+    private func isBareDesktop(_ point: NSPoint) -> Bool {
+        guard let main = NSScreen.screens.first else { return false }
+        let flipped = CGPoint(x: point.x, y: main.frame.maxY - point.y)
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        for info in list {
+            guard let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
+                  let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary), rect.contains(flipped) else { continue }
+            if (info[kCGWindowAlpha as String] as? CGFloat ?? 1) <= 0.01 { continue }
+            if (info[kCGWindowLayer as String] as? Int ?? 0) < 0 { continue }
+            return false
+        }
+        return true
+    }
+
+    /// The wallpaper can't receive clicks, since Finder's desktop sits above it, so the app watches for ones that land on the bare desktop.
+    private func desktopClick(at point: NSPoint, clicks: Int) {
+        guard defaults.bool(forKey: Key.clickWall), !defaults.bool(forKey: Key.paused), isBareDesktop(point) else { return }
+        guard let wall = walls.first(where: { $0.window.frame.contains(point) }) else { return }
+        let x = point.x - wall.window.frame.minX, y = wall.window.frame.maxY - point.y
+        wall.run("orrery.clickAt(\(x), \(y))") { value in NSLog("Orrery: desktop click at \(x),\(y): \(value ?? "nil")") }
+    }
+
     /// The wallpaper sits below the desktop icons and can't be clicked, so touching a system happens in its own window.
     @objc private func openExplore() {
         if let open = exploreWindow {
@@ -764,9 +797,10 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         w.isReleasedWhenClosed = false
         let config = WKWebViewConfiguration()
         config.userContentController.add(self, name: "app")
-        let web = WKWebView(frame: w.contentView!.bounds, configuration: config)
+        let web = ExploreWebView(frame: w.contentView!.bounds, configuration: config)
         web.autoresizingMask = [.width, .height]
         w.contentView = web
+        w.acceptsMouseMovedEvents = true
         var parts = URLComponents(url: html, resolvingAgainstBaseURL: false)!
         parts.queryItems = items
         web.loadFileURL(parts.url!, allowingReadAccessTo: html.deletingLastPathComponent())
@@ -777,10 +811,50 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
             self?.exploreWeb?.configuration.userContentController.removeAllScriptMessageHandlers()
             self?.exploreWeb = nil
             self?.exploreWindow = nil
+            NSApp.setActivationPolicy(.accessory)
         }
+        // A menu-bar app's window can stay behind others; while Explore is open this is an ordinary app.
+        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         w.center()
         w.makeKeyAndOrderFront(nil)
+        w.orderFrontRegardless()
+        w.makeFirstResponder(web)
+    }
+
+    /// Debug only: moves to the first world that's on screen and clicks it with real events, then reports what the page saw.
+    private func clickTest(_ out: String) {
+        guard let web = exploreWeb, let w = exploreWindow else { return }
+        var log = ""
+        let say = { (s: String) in log += s + "\n"; try? log.write(toFile: out + ".txt", atomically: true, encoding: .utf8) }
+        say("key=\(w.isKeyWindow) main=\(w.isMainWindow) active=\(NSApp.isActive) firstResponder=\(String(describing: w.firstResponder))")
+        web.evaluateJavaScript("orrery.pos()") { value, _ in
+            guard let text = value as? String, let data = text.data(using: .utf8), let all = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { say("no positions"); return }
+            let size = web.bounds.size
+            let worlds = all.filter { ($0["kind"] as? String) == "world" && ($0["id"] as? String) != "home" }
+            let pick = worlds.first { o in
+                let x = o["drawnX"] as? Double ?? -1, y = o["drawnY"] as? Double ?? -1
+                return x > 40 && y > 40 && x < Double(size.width) - 340 && y < Double(size.height) - 40
+            } ?? all.first { ($0["id"] as? String) == "home" }
+            guard let o = pick else { say("nothing on screen"); return }
+            let x = (o["drawnX"] as? Double) ?? (o["x"] as? Double ?? 0), y = (o["drawnY"] as? Double) ?? (o["y"] as? Double ?? 0)
+            say("target \(o)")
+            let loc = web.convert(CGPoint(x: x, y: y), to: nil)
+            let send = { (type: NSEvent.EventType) in
+                if let e = NSEvent.mouseEvent(with: type, location: loc, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: w.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1) { w.sendEvent(e) }
+            }
+            send(.mouseMoved)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                web.evaluateJavaScript("orrery.explored()") { v, _ in say("after move \(v ?? "nil")") }
+                send(.leftMouseDown); send(.leftMouseUp)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                    web.evaluateJavaScript("orrery.explored()") { v, _ in say("after click \(v ?? "nil")") }
+                    web.takeSnapshot(with: nil) { image, _ in
+                        if let tiff = image?.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) { try? png.write(to: URL(fileURLWithPath: out)) }
+                    }
+                }
+            }
+        }
     }
 
     @objc private func openSettings() {
@@ -822,7 +896,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         rate.action = #selector(rateChanged)
         rows.append([label("History speed"), rate, label("")])
 
-        for (title, key) in [("Show their chronicle on the desktop", Key.chronicle), ("Follow Nairobi's day and night, and this Mac's clock", Key.realTime), ("Show one system across all displays (no zoom)", Key.span)] {
+        for (title, key) in [("Show their chronicle on the desktop", Key.chronicle), ("Show the event log", Key.eventLog), ("Zoom to events as they happen", Key.zoomEvents), ("Click the wallpaper to visit what's there", Key.clickWall), ("Follow Nairobi's day and night, and this Mac's clock", Key.realTime), ("Show one system across all displays (no zoom)", Key.span)] {
             let box = SettingCheck(checkboxWithTitle: title, target: self, action: #selector(checkChanged))
             box.key = key
             box.state = defaults.bool(forKey: key) ? .on : .off
@@ -891,6 +965,8 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         defaults.set(on, forKey: sender.key)
         switch sender.key {
         case Key.chronicle: toAll("orrery.setChronicle(\(on))")
+        case Key.eventLog: toAll("orrery.setEventLog(\(on))")
+        case Key.zoomEvents: toAll("orrery.setZoomToEvents(\(on))")
         case Key.realTime: toAll("orrery.setRealTime(\(on))")
         case Key.span: rebuildWalls()
         default: break
@@ -930,14 +1006,33 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
                     sub.performActionForItem(at: i)
                 } else { NSLog("Orrery test: no item \(want)") }
             }
-            // Open Explore and save a picture of it, to check the real window from a script.
-            if let out = env["ORRERY_EXPLORE_SHOT"] {
-                self.openExplore()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 9) {
-                    self.exploreWeb?.takeSnapshot(with: nil) { image, _ in
-                        if let tiff = image?.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) { try? png.write(to: URL(fileURLWithPath: out)) }
+            // Check wallpaper clicks from a script: click the first thing on screen, then come back.
+            if let out = env["ORRERY_WALL_TEST"], let wall = self.walls.first {
+                wall.run("orrery.setZoom(false); orrery.pos()") { value in
+                    guard let text = value as? String, let data = text.data(using: .utf8),
+                          let all = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+                          let o = all.first(where: { ($0["id"] as? String) == "home" }), let x = o["x"] as? Double, let y = o["y"] as? Double else { try? "no positions".write(toFile: out, atomically: true, encoding: .utf8); return }
+                    let f = wall.window.frame
+                    let p = NSPoint(x: f.minX + x, y: f.maxY - y)
+                    var log = "bare=\(self.isBareDesktop(p)) target=\(x),\(y)\n"
+                    wall.run("orrery.clickAt(\(x), \(y))") { v in
+                        log += "click \(v ?? "nil")\n"
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+                            wall.run("orrery.state()") { s in
+                                log += "state \(s ?? "nil")\n"
+                                wall.web.takeSnapshot(with: nil) { image, _ in
+                                    if let tiff = image?.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) { try? png.write(to: URL(fileURLWithPath: out + ".png")) }
+                                    try? log.write(toFile: out, atomically: true, encoding: .utf8)
+                                }
+                            }
+                        }
                     }
                 }
+            }
+            // Open Explore and send real mouse events through its window, to check clicking from a script.
+            if let out = env["ORRERY_EXPLORE_SHOT"] {
+                self.openExplore()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 6) { self.clickTest(out) }
             }
             if env["ORRERY_OPEN_SETTINGS"] != nil {
                 self.openSettings()

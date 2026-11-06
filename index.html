@@ -144,6 +144,7 @@ const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const frozen = params.has('still') || reduceMotion;
 const startAt = parseFloat(params.get('t')) || 0;
 const testZ = params.has('z') ? parseFloat(params.get('z')) : null;
+const followEvents = params.has('wallpaper'); /* on the desktop, the camera goes to what just happened */
 const explore = params.has('explore'); /* the Mac app's Explore window: clickable, with a panel */
 const wallpaper = params.has('wallpaper') || explore; /* run by the Mac app: no controls, driven through window.orrery */
 let forcedPalette = null, customPalette = null, dustMul = 1;
@@ -3771,6 +3772,7 @@ function stepCam(dt) {
       cam.hold = (pacing.pMin + Math.random() * (pacing.pMax - pacing.pMin)) * (cam.to === 0 ? 1.6 : 1);
       cam.planned = null;
       if (cam.visitNext) { const f = cam.visitNext; cam.visitNext = null; goTo(f); return; }
+      if (followEvents) eventArrived();
     }
     updateScale();
     return;
@@ -3880,6 +3882,7 @@ function loop(now) {
   if (wallpaper) {
     drawOverlays();
     civTimer -= dt;
+    if (followEvents) eventTick();
     if (civTimer <= 0) { civTimer = sys.civState && sys.civState.arc ? 4 : 15; applyCiv(false); }
   }
 }
@@ -4114,6 +4117,7 @@ function applyCiv(first) {
   if (!first && lastEvent) {
     const i = c.events.findIndex(e => e.d === lastEvent.d && e.text === lastEvent.text);
     for (const e of c.events.slice(i + 1)) if (e.kind !== 'gate') pushEvent(e.kind);
+    if (followEvents) noteEvents(c.events.slice(i + 1).slice(-5));
   }
   tellApp();
 }
@@ -4382,6 +4386,7 @@ function drawOverlays() {
   }
   if (showChronicle && s.civState) drawChronicle(s);
   if (explore) drawExplore(s);
+  if (followEvents && showEventLog) drawEventLog(s);
 }
 
 /* The panel is a real cipher: every letter has its own glyph in this civilisation's script. Now and then
@@ -4570,6 +4575,9 @@ if (wallpaper) {
     setCiv(founded, rate) { civFounded = founded === null || founded === undefined ? civFounded : founded; civRate = rate || 1; applyCiv(true); },
     setRate(rate) { civRate = rate; civTimer = 0; },
     setChronicle(on) { showChronicle = on; },
+    setEventLog(on) { showEventLog = on; },
+    setZoomToEvents(on) { zoomToEvents = on; if (!on) ev.pending = null; },
+    eventState() { return JSON.stringify({ state: ev.state, pending: ev.pending && ev.pending.e.kind, rows: evLog.rows.map(r => r.text), focus: sys.focus && sys.focus.id }); },
     setRealTime(on) { realTime = on; nightAt = 0; },
     setAudio,
     places() { return JSON.stringify(focusOptions(sys).map(f => f.kind)); },
@@ -4609,7 +4617,32 @@ if (wallpaper) {
     },
     options() { return JSON.stringify(focusOptions(sys).map(f => f.label)); },
     /* For testing: where each clickable place is right now. */
-    pos() { return JSON.stringify(explore ? focusOptions(sys, true).map(f => { const [x, y] = xyOf(sys, f); return { id: f.id, kind: f.kind, x, y }; }) : []); },
+    pos() { return JSON.stringify(wallpaper ? focusOptions(sys, true).map(f => { const [x, y] = xyOf(sys, f); return { id: f.id, kind: f.kind, x, y, drawnX: f.kind === 'world' ? f.ref.x : null, drawnY: f.kind === 'world' ? f.ref.y : null }; }) : []); },
+    /* A click on the wallpaper, passed in by the app: visit what's there, or come back to the chart. */
+    clickAt(clientX, clientY) {
+      if (frozen || paused || !sys) return 'unavailable';
+      const r = canvas.getBoundingClientRect();
+      if (cam.u < 1 && cam.to === 0) return 'returning';
+      /* Mid-journey or away from the chart, a click brings you back to it. */
+      if (Math.abs(cam.z) > 0.02 || cam.u < 1) {
+        const wasOff = ev.state ? ev.wasOff : !cam.auto;
+        cam.auto = true; cam.from = cam.z; cam.to = 0; cam.u = 0; cam.dur = 3.5;
+        ev.state = 'there'; ev.wasOff = wasOff; ev.last = performance.now();
+        return 'back';
+      }
+      const f = pickAt(clientX - r.left, clientY - r.top);
+      if (!f) return 'nothing';
+      const wasOff = !cam.auto;
+      cam.auto = true;
+      goTo(f);
+      cam.dur = 4;
+      ev.state = 'going'; ev.wasOff = wasOff; ev.last = performance.now();
+      const c = sys.civState;
+      evLog.rows.push({ d: c ? c.age : 0, text: `Now viewing ${nameOf(sys, f)}`, at: performance.now() });
+      evLog.rows = evLog.rows.slice(-5);
+      return f.id;
+    },
+    explored() { return JSON.stringify({ hover: exp.hover && exp.hover.id, sel: exp.sel && exp.sel.id, cursor: canvas.style.cursor, z: cam.z, u: cam.u, stay: !!cam.stay, W: sys.W, H: sys.H, cw: canvas.clientWidth, ch: canvas.clientHeight, card: exp.els && !exp.els.card.hidden && exp.els.card.textContent.slice(0, 60), log: exp.log.slice(0, 2), active: !!document.hasFocus() }); },
     /* For tools/trait_table.py: what a seed decides, at the current size, without showing it. */
     traitsFor(seed) { const b = build(seed, canvas.clientWidth || 400, canvas.clientHeight || 300); return traitsOf(b).map(x => [x[0], x[2]]); },
     report: tellApp,
@@ -4621,6 +4654,103 @@ if (wallpaper) {
     },
   };
 }
+
+/*SITE-SKIP*/
+/* ---- Desktop: what just happened goes in a small log, and the camera visits it. ---- */
+let showEventLog = true, zoomToEvents = true;
+const evLog = { seed: 0, rows: [] };
+const ev = { pending: null, state: null, wasOff: false, last: -1e9 };
+const EVENT_GAP = 30000, EVENT_HOLD = 18, EVENT_STALE = 120000;
+function seedEventLog(s) {
+  evLog.seed = s.seed;
+  ev.pending = null; ev.state = null;
+  evLog.rows = s.civState ? s.civState.events.slice(-4).map(e => ({ d: e.d, text: e.text, at: -1e9 })) : [];
+}
+function noteEvents(list) {
+  const now = performance.now();
+  for (const e of list) {
+    evLog.rows.push({ d: e.d, text: e.text, at: now });
+    /* Whichever is newest wins, except that a quiet event never pushes aside a big one still waiting. */
+    if (!eventIsBig(ev.pending) || eventIsBig(e)) ev.pending = { e, at: now };
+  }
+  evLog.rows = evLog.rows.slice(-5);
+}
+function eventIsBig(p) {
+  const k = p && (p.e ? p.e.kind : p.kind);
+  return ['war', 'ascend', 'transcended', 'destroyBegin', 'ended', 'ruin', 'silent'].includes(k);
+}
+/* Where it happened: a place in the system, a scale for how far they now reach, or nowhere in particular. */
+function eventPlace(s, c, e) {
+  const all = focusOptions(s, true), byId = id => all.find(o => o.id === id);
+  const home = byId('home');
+  const named = () => { const i = c.worldNames.findIndex(n => n && e.text.includes(n)); return i >= 0 ? byId(s.worlds[i] === s.worlds[s.homeIdx] ? 'home' : 'world' + i) : null; };
+  const star = all.find(o => ['star', 'blackhole', 'pulsar'].includes(o.kind));
+  switch (e.kind) {
+    case 'station': case 'asteroid': { const list = all.filter(o => o.kind === e.kind); return list[list.length - 1] || null; }
+    case 'moon': return byId(`moon${s.worlds[s.homeIdx].i}.${c.moons - 1}`) || home;
+    case 'gate': return byId('gate' + (c.gates - 1));
+    case 'settled': case 'comet': return named() || home;
+    case 'dismantled': case 'ascend': case 'transcended': return star || home;
+    case 'contact': case 'stranger': return null;
+    case 'reach': return null;
+    default: return home || star || null;
+  }
+}
+function eventTick() {
+  const p = ev.pending, s = sys;
+  if (!p || !zoomToEvents || frozen || paused || !s || !s.civState) return;
+  const now = performance.now();
+  if (now - p.at > EVENT_STALE) { ev.pending = null; return; }
+  if (ev.state || cam.u < 1 || now - ev.last < EVENT_GAP || backlog.some(j => j.s === s)) return;
+  ev.pending = null;
+  const c = s.civState, wasOff = !cam.auto;
+  if (p.e.kind === 'reach') {
+    const level = clamp(c.reach, 1, LEVEL_MAX);
+    for (let L = 1; L <= level; L++) { queueJob(s, () => plateDisc(s, L)); queueJob(s, () => plate(s, L)); }
+    cam.auto = true; cam.planned = level; cam.hold = 0;
+  } else {
+    const f = eventPlace(s, c, p.e);
+    if (!f) return;
+    cam.auto = true;
+    goTo(f);
+    cam.dur = cam.z < 0 ? cam.dur : Math.min(cam.dur, 6);
+  }
+  ev.state = 'going'; ev.wasOff = wasOff; ev.last = now;
+}
+function eventArrived() {
+  if (ev.state === 'going') {
+    ev.state = 'there';
+    cam.hold = EVENT_HOLD;
+    cam.planned = 0;
+  } else if (ev.state === 'there') {
+    ev.state = null;
+    ev.last = performance.now();
+    if (ev.wasOff) { cam.auto = false; ev.wasOff = false; }
+  }
+}
+function drawEventLog(s) {
+  if (evLog.seed !== s.seed) seedEventLog(s);
+  if (!evLog.rows.length) return;
+  const now = performance.now(), { pal } = s, ROW = 15;
+  ctx.font = '400 10.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'right';
+  const n = evLog.rows.length;
+  evLog.rows.forEach((row, i) => {
+    const y = s.H - PANEL_BOTTOM - (n - 1 - i) * ROW, text = `DAY ${Math.floor(row.d)}  ${row.text}`, fresh = now - row.at < 30000;
+    const w = ctx.measureText(text).width;
+    ctx.globalAlpha = 0.82;
+    ctx.fillStyle = pal.paper;
+    ctx.fillRect(s.W - 28 - w - 4, y - ROW / 2, w + 8, ROW);
+    ctx.globalAlpha = fresh ? 1 : 0.55 + 0.35 * (i / Math.max(1, n - 1));
+    ctx.fillStyle = fresh ? pal.accent : pal.ink;
+    ctx.fillText(text, s.W - 28, y);
+  });
+  ctx.globalAlpha = 1;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+}
+/*END-SITE-SKIP*/
 
 /* ---- Explore: every system can be named, shared and touched. Used by the Mac app's Explore window and the website. ---- */
 /*SITE-SKIP*/
