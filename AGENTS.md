@@ -212,3 +212,6 @@ Stories: `civHistory` has arcs from its own stream `q3`: war (truce 72%, ruin 18
 ## 2026-11-07: Orrery 0.4.0 released
 Published at the user's request: all of the above, with the black hole icon. Not tested on another Mac: the Open Anyway steps, or a machine without these settings.
 
+## 2026-11-06: site build tool
+`tools/make_site_orrery.py` + `tools/site_layer.js` generate the website's `orrery.js` from this `index.html`: monochrome, one universe across all pages, each page a world. It patches exact strings and stops with an error if one no longer matches, so re-run it after engine changes and fix what it names. This replaces the old hand-patched copy described above.
+
