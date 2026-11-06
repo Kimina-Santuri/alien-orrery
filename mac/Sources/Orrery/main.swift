@@ -15,7 +15,7 @@ private enum Key {
     static let pauseOnBattery = "pauseOnBattery", paused = "paused", favourites = "favourites"
     static let jMin = "journeyMin", jMax = "journeyMax", pMin = "pauseMin", pMax = "pauseMax"
     static let speed = "orbitSpeed", rate = "historyRate", dust = "dust", chronicle = "chronicle"
-    static let realTime = "realTime", span = "span", sound = "sound", eventLog = "eventLog", zoomEvents = "zoomEvents", clickWall = "clickWallpaper"
+    static let realTime = "realTime", span = "span", sound = "sound", eventLog = "eventLog", zoomEvents = "zoomEvents", clickWall = "clickWallpaper", lockScreen = "lockScreen"
     static let useCustom = "useCustom", cPaper = "customPaper", cInk = "customInk", cInk2 = "customInk2", cAccent = "customAccent"
 }
 
@@ -212,6 +212,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
     private var exploreWindow: NSWindow?
     private var exploreWeb: WKWebView?
     private var spanTimer: Timer?
+    private var lockTimer: Timer?
 
     private let palettes: [(String, String)] = [
         ("verdigris", "Verdigris"), ("ultramarine", "Ultramarine"), ("amethyst", "Amethyst"), ("lichen", "Lichen"),
@@ -228,9 +229,13 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
             Key.mode: "living", Key.view: "random", Key.palette: "", Key.zoom: true, Key.change: 300,
             Key.pauseOnBattery: true, Key.paused: false,
             Key.jMin: 8.0, Key.jMax: 15.0, Key.pMin: 8.0, Key.pMax: 18.0, Key.speed: 1.0, Key.rate: 1.0, Key.dust: 1.0,
-            Key.chronicle: true, Key.eventLog: true, Key.zoomEvents: true, Key.clickWall: true, Key.realTime: true, Key.span: false, Key.sound: "off", Key.useCustom: false,
+            Key.chronicle: true, Key.eventLog: true, Key.zoomEvents: true, Key.clickWall: true, Key.lockScreen: false, Key.realTime: true, Key.span: false, Key.sound: "off", Key.useCustom: false,
             Key.cPaper: "#101418", Key.cInk: "#f2efe0", Key.cInk2: "#6f8df0", Key.cAccent: "#ff5c38",
         ])
+        // macOS shows the desktop picture on the lock screen, so keep that picture up to date with the chart.
+        lockTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in self?.refreshLockImage() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in self?.refreshLockImage() }
+        DistributedNotificationCenter.default().addObserver(forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in self?.refreshLockImage() }
         NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
             self?.desktopClick(at: NSEvent.mouseLocation, clicks: event.clickCount)
         }
@@ -686,7 +691,10 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
             NSLog("Orrery: open at login failed: \(error)")
         }
     }
-    @objc private func quit() { NSApp.terminate(nil) }
+    @objc private func quit() {
+        if defaults.bool(forKey: Key.lockScreen) { restoreDesktopPicture() }
+        NSApp.terminate(nil)
+    }
 
     // MARK: Saving
 
@@ -754,6 +762,44 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
     }
 
     // MARK: Settings window
+
+    /// Saves each display's current chart and makes it the desktop picture, which is what the lock screen shows.
+    private func refreshLockImage() {
+        guard defaults.bool(forKey: Key.lockScreen) else { return }
+        let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Orrery/LockScreen")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        for wall in walls where wall.loaded {
+            guard let screen = NSScreen.screens.first(where: { $0.frame == wall.window.frame }) else { continue }
+            let id = wall.id.filter { $0.isLetter || $0.isNumber }
+            wall.web.takeSnapshot(with: nil) { [weak self] image, _ in
+                guard let self, let tiff = image?.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+                      let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.9]) else { NSLog("Orrery: lock screen picture failed"); return }
+                let key = "lockOriginal.\(id)"
+                if self.defaults.string(forKey: key) == nil, let now = NSWorkspace.shared.desktopImageURL(for: screen), !now.path.contains("Orrery/LockScreen") {
+                    self.defaults.set(now.path, forKey: key)
+                }
+                // A new name each time, because macOS won't reload a picture whose path hasn't changed.
+                let file = folder.appendingPathComponent("\(id)-\(Int(Date().timeIntervalSince1970)).jpg")
+                do {
+                    try jpeg.write(to: file)
+                    try NSWorkspace.shared.setDesktopImageURL(file, for: screen, options: [.imageScaling: NSImageScaling.scaleProportionallyUpOrDown.rawValue, .allowClipping: true])
+                    let old = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+                    for f in old where f.lastPathComponent.hasPrefix(id + "-") && f != file { try? FileManager.default.removeItem(at: f) }
+                    NSLog("Orrery: lock screen picture set for \(id), \(jpeg.count / 1024) KB")
+                } catch { NSLog("Orrery: lock screen picture failed: \(error)") }
+            }
+        }
+    }
+
+    /// Puts back each display's own desktop picture.
+    private func restoreDesktopPicture() {
+        for wall in walls {
+            let id = wall.id.filter { $0.isLetter || $0.isNumber }, key = "lockOriginal.\(id)"
+            guard let path = defaults.string(forKey: key), let screen = NSScreen.screens.first(where: { $0.frame == wall.window.frame }) else { continue }
+            try? NSWorkspace.shared.setDesktopImageURL(URL(fileURLWithPath: path), for: screen, options: [:])
+            defaults.removeObject(forKey: key)
+        }
+    }
 
     /// True when nothing but the desktop is under this point (screen coordinates, origin bottom left).
     private func isBareDesktop(_ point: NSPoint) -> Bool {
@@ -896,7 +942,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         rate.action = #selector(rateChanged)
         rows.append([label("History speed"), rate, label("")])
 
-        for (title, key) in [("Show their chronicle on the desktop", Key.chronicle), ("Show the event log", Key.eventLog), ("Zoom to events as they happen", Key.zoomEvents), ("Click the wallpaper to visit what's there", Key.clickWall), ("Follow Nairobi's day and night, and this Mac's clock", Key.realTime), ("Show one system across all displays (no zoom)", Key.span)] {
+        for (title, key) in [("Show their chronicle on the desktop", Key.chronicle), ("Show the event log", Key.eventLog), ("Zoom to events as they happen", Key.zoomEvents), ("Click the wallpaper to visit what's there", Key.clickWall), ("Show on the lock screen (changes your desktop picture)", Key.lockScreen), ("Follow Nairobi's day and night, and this Mac's clock", Key.realTime), ("Show one system across all displays (no zoom)", Key.span)] {
             let box = SettingCheck(checkboxWithTitle: title, target: self, action: #selector(checkChanged))
             box.key = key
             box.state = defaults.bool(forKey: key) ? .on : .off
@@ -965,6 +1011,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         defaults.set(on, forKey: sender.key)
         switch sender.key {
         case Key.chronicle: toAll("orrery.setChronicle(\(on))")
+        case Key.lockScreen: if on { refreshLockImage() } else { restoreDesktopPicture() }
         case Key.eventLog: toAll("orrery.setEventLog(\(on))")
         case Key.zoomEvents: toAll("orrery.setZoomToEvents(\(on))")
         case Key.realTime: toAll("orrery.setRealTime(\(on))")
