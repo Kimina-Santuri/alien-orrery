@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import CoreMedia
+import IOKit
 import IOKit.ps
 import ScreenCaptureKit
 import ServiceManagement
@@ -15,7 +16,7 @@ private enum Key {
     static let pauseOnBattery = "pauseOnBattery", paused = "paused", favourites = "favourites"
     static let jMin = "journeyMin", jMax = "journeyMax", pMin = "pauseMin", pMax = "pauseMax"
     static let speed = "orbitSpeed", rate = "historyRate", dust = "dust", chronicle = "chronicle"
-    static let realTime = "realTime", span = "span", sound = "sound", eventLog = "eventLog", zoomEvents = "zoomEvents", clickWall = "clickWallpaper", lockScreen = "lockScreen"
+    static let realTime = "realTime", span = "span", sound = "sound", eventLog = "eventLog", zoomEvents = "zoomEvents", clickWall = "clickWallpaper", lockScreen = "lockScreen", pauseOnLid = "pauseOnLid"
     static let useCustom = "useCustom", cPaper = "customPaper", cInk = "customInk", cInk2 = "customInk2", cAccent = "customAccent"
 }
 
@@ -213,6 +214,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
     private var exploreWeb: WKWebView?
     private var spanTimer: Timer?
     private var lockTimer: Timer?
+    private var lidClosed = false
+    private var lidPort: IONotificationPortRef?
+    private var lidWatch: io_object_t = 0
 
     private let palettes: [(String, String)] = [
         ("verdigris", "Verdigris"), ("ultramarine", "Ultramarine"), ("amethyst", "Amethyst"), ("lichen", "Lichen"),
@@ -227,13 +231,13 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
     func applicationDidFinishLaunching(_ note: Notification) {
         defaults.register(defaults: [
             Key.mode: "living", Key.view: "random", Key.palette: "", Key.zoom: true, Key.change: 300,
-            Key.pauseOnBattery: true, Key.paused: false,
+            Key.pauseOnBattery: true, Key.pauseOnLid: true, Key.paused: false,
             Key.jMin: 8.0, Key.jMax: 15.0, Key.pMin: 8.0, Key.pMax: 18.0, Key.speed: 1.0, Key.rate: 1.0, Key.dust: 1.0,
             Key.chronicle: true, Key.eventLog: true, Key.zoomEvents: true, Key.clickWall: true, Key.lockScreen: false, Key.realTime: true, Key.span: false, Key.sound: "off", Key.useCustom: false,
             Key.cPaper: "#101418", Key.cInk: "#f2efe0", Key.cInk2: "#6f8df0", Key.cAccent: "#ff5c38",
         ])
         // macOS shows the desktop picture on the lock screen, so keep that picture up to date with the chart.
-        lockTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in self?.refreshLockImage() }
+        lockTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in if self?.lidClosed == false { self?.refreshLockImage() } }
         DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in self?.refreshLockImage() }
         DistributedNotificationCenter.default().addObserver(forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in self?.refreshLockImage() }
         NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
@@ -277,6 +281,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
             powerSource = source
             CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
         }
+        watchLid()
         startDebugHooks()
     }
 
@@ -415,12 +420,44 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
 
     private var shouldPause: Bool {
         if asleep || defaults.bool(forKey: Key.paused) { return true }
+        if lidClosed && defaults.bool(forKey: Key.pauseOnLid) { return true }
         if ProcessInfo.processInfo.isLowPowerModeEnabled { return true }
         return defaults.bool(forKey: Key.pauseOnBattery) && onBattery
     }
 
     @objc func applyPause() {
         DispatchQueue.main.async { self.toAll("orrery.setPaused(\(self.shouldPause))") }
+    }
+    /// The lid has its own sensor. A Mac doesn't always sleep when it closes (an external display, or anything holding
+    /// it awake), and then the sleep notifications never come, so this reads the sensor rather than waiting for them.
+    private func watchLid() {
+        let root = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
+        guard root != 0 else { return }
+        defer { IOObjectRelease(root) }
+        lidClosed = App.readLid()
+        guard let port = IONotificationPortCreate(kIOMainPortDefault) else { return }
+        lidPort = port
+        CFRunLoopAddSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(port).takeUnretainedValue(), .defaultMode)
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        IOServiceAddInterestNotification(port, root, kIOGeneralInterest, { ctx, _, _, _ in
+            guard let ctx else { return }
+            let app = Unmanaged<App>.fromOpaque(ctx).takeUnretainedValue()
+            app.lidMoved(App.readLid())
+        }, context, &lidWatch)
+    }
+    private static func readLid() -> Bool {
+        let root = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
+        guard root != 0 else { return false }
+        defer { IOObjectRelease(root) }
+        return IORegistryEntryCreateCFProperty(root, "AppleClamshellState" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? Bool ?? false
+    }
+    fileprivate func lidMoved(_ closed: Bool) {
+        guard closed != lidClosed else { return }
+        lidClosed = closed
+        NSLog("Orrery lid \(closed ? "closed" : "open")")
+        applyPause()
+        guard defaults.bool(forKey: Key.pauseOnLid) else { return }
+        if closed { listener.stop() } else { applySound() }
     }
     @objc private func wentAway() { asleep = true; applyPause() }
     @objc private func cameBack() { asleep = false; applyPause() }
@@ -476,7 +513,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         menu.addItem(.separator())
         let history = NSMenuItem(title: "Make history", action: nil, keyEquivalent: "")
         let stories = NSMenu()
-        for (kind, label, minutes) in [("war", "Start a war", 6), ("ascend", "Let them transcend", 12), ("destroy", "Let them destroy themselves", 3)] {
+        for (kind, label, minutes) in [("war", "Start a war", 6), ("ascend", "Let them transcend", 12), ("destroy", "Let them destroy themselves", 3), ("starlift", "Let them take their sun apart", 4)] {
             let item = action(label, #selector(makeHistory))
             item.representedObject = "\(kind):\(minutes)"
             stories.addItem(item)
@@ -516,8 +553,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         let battery = action("Pause on battery", #selector(toggleBattery))
         battery.state = defaults.bool(forKey: Key.pauseOnBattery) ? .on : .off
         menu.addItem(battery)
+        let lid = action("Stop when the lid is closed", #selector(toggleLid))
+        lid.state = defaults.bool(forKey: Key.pauseOnLid) ? .on : .off
+        menu.addItem(lid)
         if shouldPause && !defaults.bool(forKey: Key.paused) {
-            menu.addItem(note(ProcessInfo.processInfo.isLowPowerModeEnabled ? "Paused: Low Power Mode is on" : "Paused: on battery"))
+            menu.addItem(note(lidClosed && defaults.bool(forKey: Key.pauseOnLid) ? "Paused: the lid is closed" : ProcessInfo.processInfo.isLowPowerModeEnabled ? "Paused: Low Power Mode is on" : "Paused: on battery"))
         }
         menu.addItem(.separator())
 
@@ -677,6 +717,10 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
     }
     @objc private func togglePause() {
         defaults.set(!defaults.bool(forKey: Key.paused), forKey: Key.paused)
+        applyPause()
+    }
+    @objc private func toggleLid() {
+        defaults.set(!defaults.bool(forKey: Key.pauseOnLid), forKey: Key.pauseOnLid)
         applyPause()
     }
     @objc private func toggleBattery() {
@@ -1081,10 +1125,52 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
                 self.openExplore()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 6) { self.clickTest(out) }
             }
+            // Stories in Apple's WebKit, in a window nothing covers: a sun coming apart up close, then its worlds on the chart.
+            if let out = env["ORRERY_CRUMBLE_SHOT"] {
+                self.openExplore()
+                let run: (Double, String) -> Void = { delay, js in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                        self.exploreWeb?.evaluateJavaScript(js) { value, error in NSLog("crumble test: \(js) -> \(String(describing: value)) \(String(describing: error))") }
+                    }
+                }
+                run(6, "orrery.load(42); orrery.setCiv(Date.now() - 40 * 86400000, 1); 1")
+                run(14, "orrery.visit('star')")
+                run(28, "orrery.story('starlift', 0.02)")
+                for i in 0..<24 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 18 + Double(i) * 2.5) {
+                        self.exploreWeb?.evaluateJavaScript("orrery.crumbleState() + ' z=' + JSON.parse(orrery.state()).z + ' q=' + JSON.parse(orrery.state()).quality") { v, _ in
+                            let line = "\(i) \(v ?? "nil")\n"
+                            let log = URL(fileURLWithPath: out + "/crumble.log")
+                            if let h = try? FileHandle(forWritingTo: log) { h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close() } else { try? line.write(to: log, atomically: true, encoding: .utf8) }
+                        }
+                        self.exploreWeb?.takeSnapshot(with: nil) { image, _ in
+                            if let tiff = image?.tiffRepresentation, let jpg = NSBitmapImageRep(data: tiff)?.representation(using: .jpeg, properties: [.compressionFactor: 0.8]) {
+                                try? jpg.write(to: URL(fileURLWithPath: out + String(format: "/c%02d.jpg", i)))
+                            }
+                        }
+                    }
+                }
+            }
             if env["ORRERY_OPEN_SETTINGS"] != nil {
                 self.openSettings()
                 try? String(self.settingsWindow?.windowNumber ?? 0).write(toFile: dir + "/settings-window.txt", atomically: true, encoding: .utf8)
             }
+        }
+        // No lid can be closed from a script, so this runs the same path with the sensor's answer stood in.
+        if env["ORRERY_LID_TEST"] != nil {
+            let log = URL(fileURLWithPath: dir).appendingPathComponent("lid.log")
+            let report: (String) -> Void = { [weak self] label in
+                self?.walls.first?.run("JSON.parse(orrery.state()).paused") { value in
+                    let line = "\(label) paused=\(value ?? "nil") listening=\(self?.defaults.string(forKey: Key.sound) ?? "?")\n"
+                    if let handle = try? FileHandle(forWritingTo: log) { handle.seekToEndOfFile(); handle.write(Data(line.utf8)); try? handle.close() }
+                    else { try? line.write(to: log, atomically: true, encoding: .utf8) }
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { report("before") }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in self?.lidMoved(true) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 12) { report("closed") }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 14) { [weak self] in self?.lidMoved(false) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 16) { report("opened") }
         }
         var tick = 0
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
