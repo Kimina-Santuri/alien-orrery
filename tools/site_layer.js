@@ -175,12 +175,13 @@ function renderScene(s, t) {
   const st = s.civState;
   const enclosed = st && st.final && st.final.kind === 'transcended';
   /* The sun, unless it has been enclosed. */
-  if (!enclosed) {
+  if (!enclosed && !s.sunless) {
+    const thinned = st && st.arc && st.arc.kind === 'starlift' ? 1 - 0.45 * st.arc.progress : 1;
     ctx.fillStyle = pal.ink;
-    ctx.beginPath(); ctx.arc(c.sun.x, c.sun.y, c.sun.r * (1 + sound.bass * 0.05), 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(c.sun.x, c.sun.y, c.sun.r * thinned * (1 + sound.bass * 0.05), 0, TAU); ctx.fill();
     ctx.strokeStyle = alpha(pal.ink, 0.4);
     ctx.lineWidth = 0.7;
-    ctx.beginPath(); ctx.arc(c.sun.x, c.sun.y, c.sun.r * 1.5, 0, TAU); ctx.stroke();
+    ctx.beginPath(); ctx.arc(c.sun.x, c.sun.y, c.sun.r * thinned * 1.5, 0, TAU); ctx.stroke();
   }
   drawComms(s.commsNow || s.comms, t, 1, pal, k);
   /* A route lights up when you point at its page in the menu. */
@@ -198,7 +199,7 @@ function renderScene(s, t) {
   ctx.font = '400 10px "JetBrains Mono", ui-monospace, Menlo, monospace';
   ctx.textBaseline = 'middle';
   for (const o of c.nodes) {
-    if (o.gone) continue;
+    if ((o.gone && !o.armed) || o.crumbling) continue;
     if (o.sprite && !o.shattered) {
       ctx.save();
       ctx.beginPath(); ctx.arc(o.x, o.y, o.r, 0, TAU); ctx.clip();
@@ -220,7 +221,7 @@ function renderScene(s, t) {
   }
   ctx.textBaseline = 'alphabetic';
   /* This page's world. */
-  if (!hero.gone) {
+  if (!(hero.gone && !hero.armed) && !hero.crumbling && !hero.crumbled) {
     ctx.globalAlpha = hero.shattered ? 0.3 : 1;
     ctx.drawImage(c.heroC, hero.x - c.pad, hero.y - c.pad, c.pad * 2, c.pad * 2);
     ctx.globalAlpha = 1;
@@ -228,6 +229,7 @@ function renderScene(s, t) {
   drawArrival(s, t);
   drawStory(s, t, 1, k);
   drawEvents(s, t, 1, k);
+  if (crumbles) drawCrumbleChart(s);
 }
 
 /* You came along a route: a ship carries you in from the page you just left. */
@@ -254,6 +256,19 @@ function drawArrival(s, t) {
 /* Transcendence as seen from a world: others pour towards the sun; the swarm grows; if this one goes, only dust is left. */
 function sceneStory(s, t, k) {
   const st = s.civState, c = s.scene, { pal } = s;
+  /* A sun being taken apart: it thins, and its matter streams away as grain. */
+  if (st.arc && st.arc.kind === 'starlift') {
+    const u = st.arc.progress, reach = Math.hypot(s.W, s.H) * 0.55, shown = Math.floor(streamSeeds.length * (0.2 + 0.5 * u));
+    ctx.fillStyle = pal.ink;
+    ctx.beginPath();
+    for (let i = 0; i < shown; i++) {
+      const p = streamSeeds[i], f = (t * p.sp * 2 + p.ph) % 1, a = p.a + Math.floor(p.band * 7) / 7 * TAU + f * 1.3;
+      const rad = c.sun.r * 0.7 + f * f * reach, r = (0.5 + p.s * 0.6) * (1 - f * 0.5);
+      ctx.moveTo(c.sun.x + Math.cos(a) * rad + r, c.sun.y + Math.sin(a) * rad);
+      ctx.arc(c.sun.x + Math.cos(a) * rad, c.sun.y + Math.sin(a) * rad, r, 0, TAU);
+    }
+    ctx.fill();
+  }
   const going = (st.arc && st.arc.kind === 'ascend') || (st.final && st.final.kind === 'transcended');
   if (going) {
     const u = st.final ? 1 : st.arc.progress;
@@ -293,7 +308,7 @@ function sceneStory(s, t, k) {
     ctx.fillStyle = pal.ink;
     ctx.beginPath();
     for (const o of s.worlds) {
-      if (!o.shattered || !(o === c.hero || c.nodes.includes(o))) continue;
+      if (!o.shattered || o.crumbling || !(o === c.hero || c.nodes.includes(o))) continue;
       const big = o === c.hero;
       for (const p of shardSeeds) {
         const a = p.a + t * p.w, d = o.r * (big ? 0.55 + p.d * 0.3 : 0.45 + p.d * 1.3), r = p.s * (big ? 2 : 1);
@@ -314,8 +329,8 @@ function plannedStories(seed, age) {
   let d = age + 1.5 + q() * 2.5;
   for (let i = 0; i < 8; i++) {
     const roll = q();
-    const kind = roll < 0.55 ? 'war' : roll < 0.8 ? 'ascend' : 'destroy';
-    const dur = kind === 'war' ? 1.5 + q() * 1.5 : kind === 'ascend' ? 5 + q() * 3 : 1;
+    const kind = roll < 0.5 ? 'war' : roll < 0.72 ? 'ascend' : roll < 0.88 ? 'destroy' : 'starlift';
+    const dur = kind === 'war' ? 1.5 + q() * 1.5 : kind === 'ascend' ? 5 + q() * 3 : kind === 'starlift' ? 1.5 + q() : 1;
     list.push({ kind, d, dur });
     d += dur + 2 + q() * 3;
   }
@@ -349,7 +364,8 @@ function siteTick() {
   sliderTick();
   const c = sys && sys.civState;
   if (!c || !c.final || pendingBuild || forcedSeed || OPTS.mini) return;
-  if (c.age - c.final.d0 > 1) {
+  /* The pages' worlds come back with the new universe, once the last grain has gone. */
+  if (c.age - c.final.d0 > 1 && (c.age - c.final.d0 > 3 || !(sys.crumbles && sys.crumbles.length))) {
     universe = freshUniverse();
     saveUniverse(universe);
     loadSeed(universe.seed, universe.founded);

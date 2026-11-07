@@ -253,3 +253,6 @@ Not verified: stipple motion by eye, CPU on an uncovered desktop, setups' storie
 
 ## 2026-11-07: Orrery 0.6.0 released
 Published at the user's request from a plain `build.sh`: lid stop, stipple stories, the star-taking story and comet strikes. Checked before upload: the build holds no `ORRERY_LOCAL` code. Not tested on another Mac; a real lid closing wasn't tested before release.
+
+## 2026-11-07: dissolve shared with the website
+The crumble block now ships to the site; only `crumbleWaiting` is stripped, so its call is guarded by `followEvents`. Page views use `e.fx`, `e.fy` and `e.mono` (black and grey grain on the white palette); `tools/site_layer.js` draws it in `renderScene` and holds the next universe until the last grain has gone. `beginArc` now refuses `starlift` where there's no plain star. Desktop stories rechecked in Chrome with no page errors; not re-released, since nothing desktop-facing changed apart from that refusal.

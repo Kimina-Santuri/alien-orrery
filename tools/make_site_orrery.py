@@ -38,6 +38,7 @@ sub("const frozen = params.has('still') || reduceMotion;", "const saveData = !!(
 sub("const explore = params.has('explore'); /* the Mac app's Explore window: clickable, with a panel */\nconst wallpaper = params.has('wallpaper') || explore; /* run by the Mac app: no controls, driven through window.orrery */", "const explore = false; /* clicking is the Mac app's for now */\nconst wallpaper = true; /* civilisations and stories on */")
 s = re.sub(r"/\*SITE-SKIP\*/.*?/\*END-SITE-SKIP\*/\n", "", s, flags=re.S)
 sub("const followEvents = params.has('wallpaper'); /* on the desktop, the camera goes to what just happened */", "const followEvents = false;")
+sub("const crumbles = followEvents || explore; /* worlds and suns come apart in grain; the website keeps the simpler story */", "const crumbles = !OPTS.mini; /* worlds and suns come apart in grain */")
 sub("let forcedPalette = null,", "let forcedPalette = OPTS.palette || null,")
 sub("window.orrery = {", "window[OPTS.mini ? 'orreryMini' : 'orrery'] = {")
 s = re.sub(r"    /\* A click on the wallpaper, passed in by the app.*?(?=    explored\(\) \{)", "", s, flags=re.S)

@@ -3977,6 +3977,7 @@ function civHistory(seed, s, age) {
   const enemy = sisters.length ? sisterNames[0] : `the colonies of ${homeName}`;
   const beginArc = (d, kind, dur) => {
     if (st.arc || st.final) return;
+    if (kind === 'starlift' && !s.suns.every(x => x.kind !== 'hole' && x.kind !== 'pulsar')) return;
     if (kind === 'war') { st.arc = { kind, d0: d, dur }; add(d, 'war', `War broke out between ${homeName} and ${enemy}.`); }
     if (kind === 'ascend') { st.arc = { kind, d0: d, dur, gone: 0 }; add(d, 'ascend', `${people} stopped answering. Something is being built around the star.`); }
     if (kind === 'destroy') { st.arc = { kind, d0: d, dur }; add(d, 'destroyBegin', 'Every signal is warning of the same thing.'); }
@@ -4101,7 +4102,7 @@ function applyCiv(first) {
   const taken = s.sunless ? s.worlds.length : c.arc && c.arc.kind === 'ascend' ? c.arc.gone : c.final && c.final.kind === 'transcended' ? c.final.gone : 0;
   /* With the star gone, the worlds go after it, one by one, from the outside in. */
   let lifted = null;
-  if (crumbles && s.sunless && !wasSunless && !first) for (const sun of s.suns) if (!sun.far) { const e = crumble(s, sun, 'sun', lifted && { entry: lifted, gap: 3 }); lifted = lifted || e; }
+  if (crumbles && s.sunless && !wasSunless && !first) for (const sun of s.suns) if (!sun.far && !(s.scene && lifted)) { const e = crumble(s, sun, 'sun', lifted && { entry: lifted, gap: 3 }); lifted = lifted || e; }
   let wave = 0;
   s.worlds.slice().sort((a, b) => b.a - a.a).forEach((o, i) => {
     const was = o.gone;
@@ -4862,7 +4863,6 @@ function drawEventLog(s) {
 }
 /*END-SITE-SKIP*/
 
-/*SITE-SKIP*/
 /* ---- Worlds and suns coming apart: the thing itself dissolves into grain, the same stipple as the chart, and it floats away. ----
    Each grain takes its colour from a small copy of what's on screen, read once at the start.
    It is held until the camera arrives if the camera is on its way, so you see it happen up close. */
@@ -4878,7 +4878,7 @@ function crumble(s, ref, mode, after) {
   return e;
 }
 function crumbleReset(s) {
-  for (const e of s.crumbles || []) { e.ref.armed = false; e.ref.crumbling = false; }
+  for (const e of s.crumbles || []) { e.ref.armed = false; e.ref.crumbling = false; e.ref.crumbled = false; }
   s.crumbles = [];
 }
 const crumbleBusy = s => !!s && !!s.crumbles && s.crumbles.some(e => e.start !== null && clock - e.start < e.dur);
@@ -4890,7 +4890,7 @@ function crumbleTick(s) {
       const here = s.focus && s.focus.ref === e.ref;
       if (here && cam.z === -1 && cam.u >= 1 && s.plates && s.plates[-1]) { crumbleStart(s, e, 'close'); continue; }
       if (e.mode === 'impact') { s.crumbles.splice(s.crumbles.indexOf(e), 1); continue; }
-      if (crumbleWaiting(s, e)) continue;
+      if (followEvents && crumbleWaiting(s, e)) continue;
       crumbleStart(s, e, 'chart');
     } else if (e.where === 'chart') {
       if (clock - e.start > e.dur) crumbleEnd(s, e);
@@ -4901,15 +4901,17 @@ function crumbleTick(s) {
     }
   }
 }
+/*SITE-SKIP*/
 function crumbleWaiting(s, e) {
-  if (!followEvents || !zoomToEvents || clock - e.born > CRUMBLE_WAIT) return false;
+  if (!zoomToEvents || clock - e.born > CRUMBLE_WAIT) return false;
   if (ev.state === 'going') return !!s.focus && s.focus.ref === e.ref;
   if (!ev.pending || !s.civState) return false;
   const f = eventPlace(s, s.civState, ev.pending.e);
   return !!f && f.ref === e.ref;
 }
+/*END-SITE-SKIP*/
 function crumbleEnd(s, e) {
-  if (e.mode !== 'impact') e.ref.crumbling = false;
+  if (e.mode !== 'impact') { e.ref.crumbling = false; e.ref.crumbled = true; }
   s.crumbles.splice(s.crumbles.indexOf(e), 1);
 }
 function crumbleStart(s, e, where) {
@@ -4923,10 +4925,33 @@ function crumbleStart(s, e, where) {
   let gx, gy;
   if (isSun) { const a = (t / s.sunT) * TAU * ref.rate + ref.ph; gx = Math.cos(a) * ref.off; gy = Math.sin(a) * ref.off; }
   else { orbitXY(ref.a, ref.e, ref.w, (t / ref.T) * TAU + ref.phase, P2); gx = P2[0]; gy = P2[1]; }
-  const toStar = Math.atan2(-gy, -gx) || 0;
+  const view = s.scene && s.scene.hero ? s.scene : null;
+  const toStar = (view ? Math.atan2(view.sun.y - (isSun ? 0 : ref.y), view.sun.x - (isSun ? 0 : ref.x)) : Math.atan2(-gy, -gx)) || 0;
   e.hit = toStar + Math.PI + (Math.random() - 0.5) * 1.6;
+  e.mono = s.pal.paper === '#ffffff';
   let R, L, total, zoom, ink = s.pal.paper;
-  if (where === 'close') {
+  if (view) {
+    const big = ref === view.hero;
+    R = isSun ? view.sun.r * 1.1 : big ? view.pad : ref.r;
+    L = big ? R * 0.7 : Math.max(R, 60 * s.px); zoom = s.dpr;
+    total = big ? (LITE ? 1800 : 6000) : clamp(Math.round((Math.PI * R * R) / 3), 120, LITE ? 400 : 900);
+    e.fx = isSun ? view.sun.x : ref.x; e.fy = isSun ? view.sun.y : ref.y;
+    e.maxGrain = 1.5;
+    const pic = big ? view.heroC : isSun ? null : ref.sprite;
+    const n = big ? 128 : clamp(Math.round(R * 2), 16, 64);
+    if (pic) e.mini = crumbleCopy(pic, 0, 0, pic.width, n);
+    else {
+      e.mini = document.createElement('canvas');
+      e.mini.width = e.mini.height = n;
+      const g = e.mini.getContext('2d');
+      g.fillStyle = s.pal.ink;
+      g.beginPath(); g.arc(n / 2, n / 2, n / 2, 0, TAU); g.fill();
+    }
+    e.mask = crumbleMask(R, zoom);
+    e.mask.getContext('2d').drawImage(pic || e.mini, 0, 0, e.mask.width, e.mask.height);
+    if (mode === 'destroy' && ref.home) pushEvent('nova');
+    if (mode === 'dismantle') pushEvent('taken', ref);
+  } else if (where === 'close') {
     const p = s.plates[-1], min = Math.min(s.W, s.H);
     const body = p.world ? p.world.Rw : min * 0.4;
     R = isSun ? body * 1.15 : ref.ring ? body * Math.max(1, ref.ring.a2) : body;
@@ -4989,7 +5014,7 @@ function crumbleCells(e, R, total, L, toStar) {
     const ang = rnd() * TAU, rad = R * Math.sqrt(rnd()), x = Math.cos(ang) * rad, y = Math.sin(ang) * rad;
     const nx = rad ? x / rad : 0, ny = rad ? y / rad : 0, r = rnd(), r2 = rnd();
     const big = rnd() < 0.05 ? 1.8 : 1;
-    const c = { x, y, r: gap * (0.15 + rnd() * 0.17) * big, delay: 0, vx: 0, vy: 0, ax: 0, ay: 0, drag: 0, wob: (r2 - 0.5) * L * 0.05, ph: rnd() * TAU };
+    const c = { x, y, r: Math.min(e.maxGrain || Infinity, gap * (0.15 + rnd() * 0.17) * big), delay: 0, vx: 0, vy: 0, ax: 0, ay: 0, drag: 0, wob: (r2 - 0.5) * L * 0.05, ph: rnd() * TAU };
     if (e.mode === 'dismantle') {
       /* Peeled off from the side facing the star, and carried towards it. */
       const facing = (x * sx + y * sy) / R, side = r2 - 0.5;
@@ -5026,7 +5051,10 @@ function crumbleCells(e, R, total, L, toStar) {
     const at = (clamp(Math.floor(((y + R) / (2 * R)) * n), 0, n - 1) * n + clamp(Math.floor(((x + R) / (2 * R)) * n), 0, n - 1)) * 4;
     cells.push(c);
     if (px[at + 3] < 40) continue;
-    const key = `rgb(${(px[at] >> 4) * 16 + 8},${(px[at + 1] >> 4) * 16 + 8},${(px[at + 2] >> 4) * 16 + 8})`;
+    /* The website stays black, grey and white: fine stipple averages to pale grey, so keep its contrast. */
+    const grey = (px[at] + px[at + 1] + px[at + 2]) / 3;
+    if (e.mono && grey > 248) continue;
+    const key = e.mono ? (grey < 225 ? '#050505' : '#8e8e8e') : `rgb(${(px[at] >> 4) * 16 + 8},${(px[at + 1] >> 4) * 16 + 8},${(px[at + 2] >> 4) * 16 + 8})`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(c);
   }
@@ -5099,9 +5127,9 @@ function drawCrumbleChart(s) {
   const size = lerp(1, s.vs, cam.k);
   for (const e of s.crumbles) {
     if (e.start === null || e.where !== 'chart') continue;
-    place(s, e.gx, e.gy);
+    if (e.fx === undefined) place(s, e.gx, e.gy);
     const a = ctx.globalAlpha;
-    crumblePieces(s, e, VX, VY, size, a);
+    crumblePieces(s, e, e.fx === undefined ? VX : e.fx, e.fx === undefined ? VY : e.fy, e.fx === undefined ? size : 1, a);
     ctx.globalAlpha = a;
   }
 }
@@ -5140,7 +5168,6 @@ function drawCrumbleClose(s, p, a01) {
     }
   }
 }
-/*END-SITE-SKIP*/
 
 /* ---- Explore: every system can be named, shared and touched. Used by the Mac app's Explore window and the website. ---- */
 /*SITE-SKIP*/
