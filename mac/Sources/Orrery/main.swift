@@ -206,7 +206,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
     private let defaults = UserDefaults.standard
     private var html: URL!
     private var powerSource: CFRunLoopSource?
-    private var asleep = false
+    // Each system reason has its own flag, cleared only by its own partner notification (or by Resume), so one
+    // unpaired notification can't hold the wallpaper still under another's name.
+    private var screensAsleep = false, systemAsleep = false, sessionAway = false
+    private var asleep: Bool { screensAsleep || systemAsleep || sessionAway }
+    private var lastPause: String?
     private let listener = SoundListener()
     private var soundNote: String?
     private var settingsWindow: NSWindow?
@@ -268,10 +272,10 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         center.addObserver(self, selector: #selector(applyPause), name: .NSProcessInfoPowerStateDidChange, object: nil)
         let workspace = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.screensDidSleepNotification, NSWorkspace.willSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
-            workspace.addObserver(self, selector: #selector(wentAway), name: name, object: nil)
+            workspace.addObserver(self, selector: #selector(wentAway(_:)), name: name, object: nil)
         }
         for name in [NSWorkspace.screensDidWakeNotification, NSWorkspace.didWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
-            workspace.addObserver(self, selector: #selector(cameBack), name: name, object: nil)
+            workspace.addObserver(self, selector: #selector(cameBack(_:)), name: name, object: nil)
         }
         let context = Unmanaged.passUnretained(self).toOpaque()
         if let source = IOPSNotificationCreateRunLoopSource({ ctx in
@@ -282,6 +286,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
             CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
         }
         watchLid()
+        applyPause()
         startDebugHooks()
     }
 
@@ -418,15 +423,28 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         return (type as String) == kIOPSBatteryPowerValue
     }
 
-    private var shouldPause: Bool {
-        if asleep || defaults.bool(forKey: Key.paused) { return true }
-        if lidClosed && defaults.bool(forKey: Key.pauseOnLid) { return true }
-        if ProcessInfo.processInfo.isLowPowerModeEnabled { return true }
-        return defaults.bool(forKey: Key.pauseOnBattery) && onBattery
+    /// Why the wallpaper is held still, or nil when it should move. The first reason found wins.
+    private var pauseReason: String? {
+        if defaults.bool(forKey: Key.paused) { return "paused from the menu" }
+        if systemAsleep { return "the Mac is asleep" }
+        if screensAsleep { return "the screen is off" }
+        if sessionAway { return "another user is active" }
+        if lidClosed && defaults.bool(forKey: Key.pauseOnLid) { return "the lid is closed" }
+        if ProcessInfo.processInfo.isLowPowerModeEnabled { return "Low Power Mode is on" }
+        if defaults.bool(forKey: Key.pauseOnBattery) && onBattery { return "on battery" }
+        return nil
     }
+    private var shouldPause: Bool { pauseReason != nil }
 
     @objc func applyPause() {
-        DispatchQueue.main.async { self.toAll("orrery.setPaused(\(self.shouldPause))") }
+        DispatchQueue.main.async {
+            let reason = self.pauseReason
+            if reason != self.lastPause {
+                NSLog("Orrery pause: \(reason.map { "paused, \($0)" } ?? "running")")
+                self.lastPause = reason
+            }
+            self.toAll("orrery.setPaused(\(reason != nil))")
+        }
     }
     /// The lid has its own sensor. A Mac doesn't always sleep when it closes (an external display, or anything holding
     /// it awake), and then the sleep notifications never come, so this reads the sensor rather than waiting for them.
@@ -459,8 +477,25 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         guard defaults.bool(forKey: Key.pauseOnLid) else { return }
         if closed { listener.stop() } else { applySound() }
     }
-    @objc private func wentAway() { asleep = true; applyPause() }
-    @objc private func cameBack() { asleep = false; applyPause() }
+    @objc private func wentAway(_ note: Notification) {
+        NSLog("Orrery: \(note.name.rawValue)")
+        switch note.name {
+        case NSWorkspace.screensDidSleepNotification: screensAsleep = true
+        case NSWorkspace.willSleepNotification: systemAsleep = true
+        default: sessionAway = true
+        }
+        applyPause()
+    }
+    @objc private func cameBack(_ note: Notification) {
+        NSLog("Orrery: \(note.name.rawValue)")
+        switch note.name {
+        case NSWorkspace.screensDidWakeNotification: screensAsleep = false
+        // A wake means the Mac and, almost always, its screen are back; don't wait for a screens notification that may not come.
+        case NSWorkspace.didWakeNotification: systemAsleep = false; screensAsleep = false
+        default: sessionAway = false
+        }
+        applyPause()
+    }
     @objc private func screensChanged() {
         let now = targets().map { "\($0.frame)" }.sorted()
         let was = walls.map { "\($0.window.frame)" }.sorted()
@@ -549,15 +584,15 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         menu.addItem(action("Settings…", #selector(openSettings), key: ","))
         menu.addItem(.separator())
 
-        menu.addItem(action(defaults.bool(forKey: Key.paused) ? "Resume" : "Pause", #selector(togglePause), key: "p"))
+        menu.addItem(action(defaults.bool(forKey: Key.paused) || asleep ? "Resume" : "Pause", #selector(togglePause), key: "p"))
         let battery = action("Pause on battery", #selector(toggleBattery))
         battery.state = defaults.bool(forKey: Key.pauseOnBattery) ? .on : .off
         menu.addItem(battery)
         let lid = action("Stop when the lid is closed", #selector(toggleLid))
         lid.state = defaults.bool(forKey: Key.pauseOnLid) ? .on : .off
         menu.addItem(lid)
-        if shouldPause && !defaults.bool(forKey: Key.paused) {
-            menu.addItem(note(lidClosed && defaults.bool(forKey: Key.pauseOnLid) ? "Paused: the lid is closed" : ProcessInfo.processInfo.isLowPowerModeEnabled ? "Paused: Low Power Mode is on" : "Paused: on battery"))
+        if let reason = pauseReason, !defaults.bool(forKey: Key.paused) {
+            menu.addItem(note("Paused: \(reason)"))
         }
         menu.addItem(.separator())
 
@@ -716,7 +751,13 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         toAll("orrery.setZoom(\(on))")
     }
     @objc private func togglePause() {
-        defaults.set(!defaults.bool(forKey: Key.paused), forKey: Key.paused)
+        if defaults.bool(forKey: Key.paused) || asleep {
+            // Resume: the person is here and looking, so whatever sleep notification held it is out of date.
+            defaults.set(false, forKey: Key.paused)
+            screensAsleep = false; systemAsleep = false; sessionAway = false
+        } else {
+            defaults.set(true, forKey: Key.paused)
+        }
         applyPause()
     }
     @objc private func toggleLid() {
@@ -1171,6 +1212,27 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
             DispatchQueue.main.asyncAfter(deadline: .now() + 12) { report("closed") }
             DispatchQueue.main.asyncAfter(deadline: .now() + 14) { [weak self] in self?.lidMoved(false) }
             DispatchQueue.main.asyncAfter(deadline: .now() + 16) { report("opened") }
+        }
+        if env["ORRERY_AWAY_TEST"] != nil {
+            // A screens-asleep notification with no partner (the stuck case), then Resume from the menu.
+            let log = URL(fileURLWithPath: dir).appendingPathComponent("away.log")
+            let report: (String) -> Void = { [weak self] label in
+                self?.walls.first?.run("JSON.parse(orrery.state()).paused") { value in
+                    let line = "\(label) page-paused=\(value ?? "nil") setting=\(self?.defaults.bool(forKey: Key.paused) ?? false) reason=\(self?.pauseReason ?? "none")\n"
+                    if let handle = try? FileHandle(forWritingTo: log) { handle.seekToEndOfFile(); handle.write(Data(line.utf8)); try? handle.close() }
+                    else { try? line.write(to: log, atomically: true, encoding: .utf8) }
+                }
+            }
+            let post = { (name: Notification.Name) in NSWorkspace.shared.notificationCenter.post(name: name, object: NSWorkspace.shared) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { report("before") }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 9) { post(NSWorkspace.screensDidSleepNotification) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) { report("stuck") }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 11) { [weak self] in self?.togglePause() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 12) { report("resumed") }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 13) { post(NSWorkspace.sessionDidResignActiveNotification); post(NSWorkspace.screensDidWakeNotification) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 14) { report("session-away-screens-woke") }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 15) { post(NSWorkspace.sessionDidBecomeActiveNotification) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 16) { report("session-back") }
         }
         var tick = 0
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
