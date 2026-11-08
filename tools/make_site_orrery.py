@@ -45,7 +45,7 @@ s = re.sub(r"    /\* A click on the wallpaper, passed in by the app.*?(?=    exp
 sub("if (now - lastDraw < (moving && !LITE && quality > 0.7 ? 15 : 32)) return;", "if (now - lastDraw < (OPTS.mini ? 66 : moving && !LITE && quality > 0.7 ? 15 : 32)) return;")
 sub("  document.getElementById('scale').textContent = `${label} · ${size}`;\n", "  void label; void size;\n")
 # Enough worlds for every page; suns kept right or top, clear of the navigation.
-s = re.sub(r"  const n = kind === 'compact' \? (.*?);\n", lambda m: "  const n = Math.max(10, kind === 'compact' ? " + m.group(1) + ");\n", s, count=1)
+s = re.sub(r"  const n = kind === 'compact' \? (.*?);\n", lambda m: "  const n = Math.max(11, kind === 'compact' ? " + m.group(1) + ");\n", s, count=1)
 sub("  const nearStart = !landscape || r() < 0.5;\n", "  const coin0 = r();\n  void coin0;\n  const nearStart = !landscape;\n")
 sub("const shot = shotRoll < 0.5 ? 'edge' : shotRoll < 0.68 ? 'corner' : shotRoll < 0.86 ? 'inset' : 'beyond';", "const shot = shotRoll < 0.6 ? 'edge' : shotRoll < 0.8 ? 'corner' : 'beyond';")
 # Slower pacing on the site.

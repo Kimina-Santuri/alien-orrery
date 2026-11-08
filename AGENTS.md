@@ -268,3 +268,7 @@ Not verified: a real restart, real sleep and wake, the menu label and note while
 
 ## 2026-11-08: Orrery 0.6.1 released
 Published at the user's request from a plain `build.sh` (version 0.6.1, build 11): the pause reasons fix above, plus the starlift refusal from the dissolve commit. Checked before upload: no `ORRERY_LOCAL` code, page identical to `index.html`, arm64, ad-hoc signature valid, and the build ran the `ORRERY_AWAY_TEST` hook correctly. The uploaded zip's SHA-256 matches the local one, and releases/latest points to v0.6.1 (the website's Downloads link uses latest). Afterwards `/Applications/Orrery.app` was reinstalled as a private 0.6.1 build (`--install --mine`), so `mac/build/` is a --mine build again. Not tested: another Mac, a real restart.
+
+## 2026-11-08: Music world for the website (committed)
+
+- `tools/site_layer.js` and `tools/make_site_orrery.py`: the website's new Music page gets its own world (at least 11 worlds). This was live on kimina.co.ke since c745d8e but uncommitted here. Verified: running `make_site_orrery.py` reproduces the website's committed `orrery.js` byte for byte. Committed and pushed at the user's request; no app or release change.
