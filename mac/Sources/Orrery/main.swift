@@ -14,6 +14,7 @@ import WebKit
 private enum Key {
     static let mode = "mode", view = "view", palette = "palette", zoom = "zoom", change = "changeSeconds"
     static let pauseOnBattery = "pauseOnBattery", paused = "paused", favourites = "favourites"
+    static let slowOnBattery = "slowOnBattery"
     static let jMin = "journeyMin", jMax = "journeyMax", pMin = "pauseMin", pMax = "pauseMax"
     static let speed = "orbitSpeed", rate = "historyRate", dust = "dust", chronicle = "chronicle"
     static let realTime = "realTime", span = "span", sound = "sound", eventLog = "eventLog", zoomEvents = "zoomEvents", clickWall = "clickWallpaper", lockScreen = "lockScreen", pauseOnLid = "pauseOnLid"
@@ -235,7 +236,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
     func applicationDidFinishLaunching(_ note: Notification) {
         defaults.register(defaults: [
             Key.mode: "living", Key.view: "random", Key.palette: "", Key.zoom: true, Key.change: 300,
-            Key.pauseOnBattery: true, Key.pauseOnLid: true, Key.paused: false,
+            Key.pauseOnBattery: true, Key.pauseOnLid: true, Key.paused: false, Key.slowOnBattery: true,
             Key.jMin: 8.0, Key.jMax: 15.0, Key.pMin: 8.0, Key.pMax: 18.0, Key.speed: 1.0, Key.rate: 1.0, Key.dust: 1.0,
             Key.chronicle: true, Key.eventLog: true, Key.zoomEvents: true, Key.clickWall: true, Key.lockScreen: false, Key.realTime: true, Key.span: false, Key.sound: "off", Key.useCustom: false,
             Key.cPaper: "#101418", Key.cInk: "#f2efe0", Key.cInk2: "#6f8df0", Key.cAccent: "#ff5c38",
@@ -390,6 +391,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         wall.run("orrery.setRealTime(\(defaults.bool(forKey: Key.realTime)))")
         wall.run("orrery.setRate(\(defaults.double(forKey: Key.rate)))")
         wall.run("orrery.setPaused(\(shouldPause))")
+        wall.run(frameRateJS)
         wall.run("orrery.report()")
     }
 
@@ -444,7 +446,13 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
                 self.lastPause = reason
             }
             self.toAll("orrery.setPaused(\(reason != nil))")
+            self.toAll(self.frameRateJS)
         }
+    }
+    /// Frames a second at rest and while the camera moves: half as many on battery, which roughly halves the drawing work.
+    private var frameRateJS: String {
+        let slow = defaults.bool(forKey: Key.slowOnBattery) && onBattery
+        return slow ? "orrery.setFrameRate && orrery.setFrameRate(15, 30)" : "orrery.setFrameRate && orrery.setFrameRate(30, 60)"
     }
     /// The lid has its own sensor. A Mac doesn't always sleep when it closes (an external display, or anything holding
     /// it awake), and then the sleep notifications never come, so this reads the sensor rather than waiting for them.
@@ -588,6 +596,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         let battery = action("Pause on battery", #selector(toggleBattery))
         battery.state = defaults.bool(forKey: Key.pauseOnBattery) ? .on : .off
         menu.addItem(battery)
+        let slow = action("Slower on battery", #selector(toggleSlow))
+        slow.state = defaults.bool(forKey: Key.slowOnBattery) ? .on : .off
+        menu.addItem(slow)
         let lid = action("Stop when the lid is closed", #selector(toggleLid))
         lid.state = defaults.bool(forKey: Key.pauseOnLid) ? .on : .off
         menu.addItem(lid)
@@ -762,6 +773,10 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
     }
     @objc private func toggleLid() {
         defaults.set(!defaults.bool(forKey: Key.pauseOnLid), forKey: Key.pauseOnLid)
+        applyPause()
+    }
+    @objc private func toggleSlow() {
+        defaults.set(!defaults.bool(forKey: Key.slowOnBattery), forKey: Key.slowOnBattery)
         applyPause()
     }
     @objc private func toggleBattery() {

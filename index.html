@@ -139,6 +139,14 @@ function orbitXY(a, e, w, M, out) {
 
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d', { alpha: false });
+/* Spread across displays, the system is laid out on the whole desktop but each display's canvas only holds
+   its own part: every transform is shifted by where this display sits, so nothing off-screen is filled. */
+const screenIdentity = ctx.setTransform.bind(ctx, 1, 0, 0, 1, 0, 0);
+const spanAt = (() => { const p = new URLSearchParams(location.search).get('span'); return p ? p.split(',').map(Number) : null; })();
+if (spanAt) {
+  const raw = ctx.setTransform.bind(ctx);
+  ctx.setTransform = (a, b, c, d, e, f) => raw(a, b, c, d, e - spanAt[0] * (sys ? sys.dpr : 1), f - spanAt[1] * (sys ? sys.dpr : 1));
+}
 const params = new URLSearchParams(location.search);
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const frozen = params.has('still') || reduceMotion;
@@ -1622,10 +1630,12 @@ function drawDots(groups, scale) {
 
 /* A pyramid of smaller copies: shrinking uses the closest one rather than resampling a
    huge image every frame. The smallest doubles as the soft tone under sharp grain. */
-function mipsOf(c) {
+function mipsOf(c) { return drain(mipsGen(c)); }
+function* mipsGen(c) {
   const out = [c];
   let last = c;
   while (last.width > 400) {
+    yield;
     const m = document.createElement('canvas');
     m.width = m.height = Math.ceil(last.width / 2);
     const g = m.getContext('2d');
@@ -1692,7 +1702,12 @@ function finished(s, key, make) {
 }
 const backlog = [];
 function queueWork(s, key, make) { backlog.push({ s, key, make }); }
-function queueJob(s, run) { backlog.push({ s, run }); }
+function queueJob(s, run, name) { backlog.push({ s, run, name }); }
+/* A plate painted in the background: its print and round sprite, then `then`. `first` jumps the queue. */
+function queuePlate(s, level, then, first) {
+  const job = { s, plate: level, focus: level === -1 ? s.focus : null, then, name: 'plate' + level };
+  if (first) backlog.unshift(job); else backlog.push(job);
+}
 let backlogRest = 0;
 function runBacklog(ms) {
   const until = performance.now() + ms;
@@ -1700,6 +1715,14 @@ function runBacklog(ms) {
     if (backlogRest > 0) { backlogRest--; return; }
     const job = backlog[0];
     if (job.s !== sys) { backlog.shift(); continue; }
+    lastJob = job.name || job.key || 'job';
+    if (job.plate !== undefined) {
+      if (plateReady(job.s, job.plate, job.focus)) { backlog.shift(); if (job.then) job.then(); continue; }
+      const t1 = performance.now();
+      plateWork(job.s, job.plate, 'rest', job.focus).next();
+      if (performance.now() - t1 > 80) { slowLog.push('step ' + job.plate + ' ' + (job.focus ? job.focus.kind : '') + ' ' + Math.round(performance.now() - t1) + ' at ' + stepAt); if (slowLog.length > 12) slowLog.shift(); }
+      continue;
+    }
     if (job.run) {
       /* Whole jobs can't be cut up, so one at a time, with some frames between them. */
       backlog.shift();
@@ -1779,7 +1802,8 @@ function* starDiscGen(s) {
   drawCometPaths(s, g);
   paintChartMarks(s, g, true);
   yield;
-  return { mips: mipsOf(c), x: cx - R, y: cy - R, size: R * 2, ops: g.__ops };
+  const mips = yield* mipsGen(c);
+  return { mips, x: cx - R, y: cy - R, size: R * 2, ops: g.__ops };
 }
 
 /* Shared painter for the home-centred sky. Each grain is a body at a random moment,
@@ -1993,7 +2017,8 @@ function* homeDiscGen(s) {
     r: mulberry(s.seed * 2654435761 + 197), u: 1 / q, grain: Math.min(c.width * c.width * 0.13, LITE ? 150000 : 450000), limit: R, maxSteps: 700,
   });
   yield;
-  return { mips: mipsOf(c), x: W / 2 - R, y: H / 2 - R, size: R * 2, ops: g.__ops };
+  const mips = yield* mipsGen(c);
+  return { mips, x: W / 2 - R, y: H / 2 - R, size: R * 2, ops: g.__ops };
 }
 
 /* ------------------------------------------------------------------------------------
@@ -2074,7 +2099,7 @@ function twinkles(r, n, pick) {
   return out;
 }
 
-function buildWorld(s) {
+function* buildWorld(s) {
   const b = plateBase(s, 211);
   const { g, r, u, k, min, max } = b, { pal } = s;
   const home = s.focus.ref;
@@ -2085,7 +2110,7 @@ function buildWorld(s) {
   const height = surf.field;
   const ring = home.ring;
   const ringInner = ring ? Rw * ring.a1 : 0, ringOuter = ring ? Rw * ring.a2 : 0;
-  const ringDots = front => {
+  const ringDots = function* (front) {
     const d = dotBuckets([pal.ink, pal.ink2]);
     const n = ((ringOuter + ringInner) / u) * ((ringOuter - ringInner) / u) * 2.4;
     const c = Math.cos(ring.rot), sn = Math.sin(ring.rot);
@@ -2099,9 +2124,9 @@ function buildWorld(s) {
       const x = Math.cos(a) * rho, y = Math.sin(a) * rho * ring.tilt;
       d.add(r() < 0.6 ? 0 : 1, x * c - y * sn, x * sn + y * c, (0.55 + r() * r() * 0.6) * u);
     }
-    d.flush(g, 0.8 * u);
+    yield* d.steps(g, 0.8 * u);
   };
-  if (ring) ringDots(false);
+  if (ring) yield* ringDots(false);
 
   g.save();
   g.beginPath();
@@ -2111,7 +2136,7 @@ function buildWorld(s) {
   g.fillRect(-Rw, -Rw, Rw * 2, Rw * 2);
   const dots = dotBuckets([pal.ink, pal.ink2, pal.accent]);
   const n = Math.PI * (Rw / u) * (Rw / u) * 0.5;
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < n; i++) { if ((i & 2047) === 2047) yield;
     const a = r() * TAU, d = Math.sqrt(r()) * Rw;
     const x = Math.cos(a) * d, y = Math.sin(a) * d;
     /* Coasts are dithered: land thins out towards the sea instead of stopping dead. */
@@ -2130,13 +2155,13 @@ function buildWorld(s) {
       dots.add(0, (ox + Math.cos(a) * t * rad) * Rw, (oy + Math.sin(a) * t * rad) * Rw, (0.55 + r() * 0.5) * u);
     }
   }
-  dots.flush(g, 0.8 * u);
+  yield* dots.steps(g, 0.8 * u);
   g.restore();
 
   /* City lights are drawn live, so they come on as night passes over them. */
   const lights = [];
   const lightTries = home.living ? 2600 * Math.pow(Rw / (min * 0.29), 2) : 0;
-  for (let i = 0; i < lightTries; i++) {
+  for (let i = 0; i < lightTries; i++) { if ((i & 2047) === 2047) yield;
     const a = r() * TAU, d = Math.sqrt(r()) * Rw * 0.98;
     const x = Math.cos(a) * d, y = Math.sin(a) * d;
     const onLand = height(x / Rw, y / Rw) > 0;
@@ -2157,13 +2182,13 @@ function buildWorld(s) {
     g.arc(0, 0, Rw * (1 + i * 0.022), 0, TAU);
     g.stroke();
   }
-  if (ring) ringDots(true);
+  if (ring) yield* ringDots(true);
 
   /* The calendar and script sit outside the rings, if it has any. */
   const ticks = s.base * s.base;
   const inner = Math.max(Rw * 1.1, ringOuter * 1.05);
   g.strokeStyle = pal.ink;
-  for (let i = 0; i < ticks; i++) {
+  for (let i = 0; i < ticks; i++) { if ((i & 2047) === 2047) yield;
     const a = (i / ticks) * TAU, major = i % s.base === 0, len = (major ? 9 : 4) * k;
     g.lineWidth = major ? 1.1 : 0.7;
     g.beginPath();
@@ -2256,9 +2281,9 @@ function buildWorld(s) {
 }
 
 /* ---- Close-ups for everything else worth visiting ---- */
-function starfield(b, s, dots, keepOut) {
+function* starfield(b, s, dots, keepOut) {
   const { r, u, R } = b;
-  for (let i = 0, n = (R / u) * (R / u) * 0.05; i < n; i++) {
+  for (let i = 0, n = (R / u) * (R / u) * 0.05; i < n; i++) { if ((i & 2047) === 2047) yield;
     const a = r() * TAU, d = Math.sqrt(r()) * R;
     const x = Math.cos(a) * d, y = Math.sin(a) * d;
     if (keepOut && keepOut(x, y)) continue;
@@ -2279,11 +2304,13 @@ function outsideShipLanes(q, b, target, count, baseT, hot) {
 }
 
 /* ---- A small kit for drawing anything out of grain, so nothing here is a flat shape ---- */
-function grainDisc(d, r, x, y, R, u, o) {
+function grainDisc(d, r, x, y, R, u, o) { drain(grainDiscSteps(d, r, x, y, R, u, o)); }
+function* grainDiscSteps(d, r, x, y, R, u, o) {
   /* A shaded ball of dots: thick on the lit side, thinning into the dark, hard at the rim. */
   const lx = o.lx || 0, ly = o.ly || 0, shade = o.shade === undefined ? 0.9 : o.shade;
   const n = Math.PI * (R / u) * (R / u) * (o.dens || 1);
   for (let i = 0; i < n; i++) {
+    if ((i & 4095) === 4095) yield;
     const a = r() * TAU, t = Math.sqrt(r()), nx = Math.cos(a) * t, ny = Math.sin(a) * t;
     const lit = clamp(0.5 + (nx * lx + ny * ly) * 0.9, 0, 1);
     const keep = (1 - shade) + shade * lit;
@@ -2396,24 +2423,24 @@ function paintSettlement(g, s, r, sites, culture, u, k, lx, ly) {
   }
 }
 
-function buildPulsar(s) {
+function* buildPulsar(s) {
   const b = plateBase(s, 277);
   const { g, r, u, k, min, R } = b, { pal } = s;
   const sun = s.focus.ref, Rp = min * 0.07;
   const q = mulberry(s.seed * 2654435761 + 809);
   const d = dotBuckets([pal.ink, pal.ink2, pal.accent]);
-  starfield(b, s, d, null);
+  yield* starfield(b, s, d, null);
   /* The magnetic field: loops of grain reaching out and back to the poles. */
-  for (let loop = 0; loop < 14; loop++) {
+  for (let loop = 0; loop < 14; loop++) { if ((loop & 2047) === 2047) yield;
     const m = 1.8 + loop * 0.55, side = loop % 2 ? 1 : -1;
     for (let i = 0, n = 900 + m * 200; i < n; i++) {
       const th = r() * Math.PI, rho = Rp * m * Math.pow(Math.sin(th), 2) * 2.1 + Rp;
       d.add(r() < 0.6 ? 1 : 0, Math.cos(th) * side * rho * 0.0 + Math.sin(th) * side * rho, Math.cos(th) * rho, (0.5 + r() * 0.35) * u);
     }
   }
-  grainDisc(d, r, 0, 0, Rp, u, { dens: 1.3, shade: 0, big: 0.8 });
+  yield* grainDiscSteps(d, r, 0, 0, Rp, u, { dens: 1.3, shade: 0, big: 0.8 });
   grainBand(d, r, 0, 0, Rp, Rp * 2.2, u, { dens: 0.9, fall: 2.4, big: 0.4, colour: () => 2 });
-  d.flush(g, 0.8 * u);
+  yield* d.steps(g, 0.8 * u);
   glyphWord(g, s, r, Rp * 3, -Rp * 3, 4, k, pal.accent);
   const seeds = Array.from({ length: 420 }, () => ({ t: Math.pow(q(), 0.75), off: (q() - 0.5) * 2, s: (0.5 + q() * q() * 1.3) * k }));
   const reach = Math.hypot(b.min, b.max) * 0.62;
@@ -2437,12 +2464,12 @@ function buildPulsar(s) {
   };
 }
 
-function buildBlackHole(s) {
+function* buildBlackHole(s) {
   const b = plateBase(s, 241);
   const { g, r, u, k, min, R } = b, { pal } = s;
   const f = s.focus.ref, Rb = min * 0.11, tilt = f.tilt, rot = -0.3;
   const c = Math.cos(rot), sn = Math.sin(rot);
-  const disc = front => {
+  const disc = function* (front) {
     const d = dotBuckets([pal.ink, pal.ink2, pal.accent]);
     const n = (Rb / u) * (Rb / u) * 30;
     for (let i = 0; i < n; i++) {
@@ -2453,25 +2480,25 @@ function buildBlackHole(s) {
       if (r() > 0.55 + 0.45 * Math.sin(t * 90 + r() * 0.5)) continue;
       d.add(t < 0.22 && r() < 0.75 ? 2 : r() < 0.2 + 0.7 * (1 - t) ? 0 : 1, x * c - y * sn, x * sn + y * c, (0.55 + r() * r() * (1 - t)) * u);
     }
-    d.flush(g, 0.8 * u);
+    yield* d.steps(g, 0.8 * u);
   };
   const stars = dotBuckets([pal.ink, pal.ink2, pal.accent]);
   /* Starlight thickens where the hole bends it into a ring around itself. */
-  starfield(b, s, stars, (x, y) => Math.hypot(x, y) < Rb * 2);
+  yield* starfield(b, s, stars, (x, y) => Math.hypot(x, y) < Rb * 2);
   grainBand(stars, r, 0, 0, Rb * 1.9, Rb * 3.4, u, { dens: 0.22, fall: 2.6, colour: () => 1, big: 0.3 });
-  stars.flush(g, 0.8 * u);
-  disc(false);
+  yield* stars.steps(g, 0.8 * u);
+  yield* disc(false);
   /* Light from the far side of the disc, bent up and over the hole. */
   const bent = dotBuckets([pal.accent, pal.ink]);
   grainBand(bent, r, 0, 0, Rb * 1.14, Rb * 1.86, u, { dens: 1.5, fall: 2.2, big: 0.9, colour: t => (t < 0.28 ? 0 : 1) });
-  bent.flush(g, 0.8 * u);
+  yield* bent.steps(g, 0.8 * u);
   /* The hole is the one truly empty thing here, cut clean by grain packed against its edge. */
   g.fillStyle = '#030303';
   g.beginPath(); g.arc(0, 0, Rb, 0, TAU); g.fill();
   const lip = dotBuckets([pal.accent]);
   grainBand(lip, r, 0, 0, Rb, Rb * 1.12, u, { dens: 2.2, fall: 2.4, big: 1, colour: () => 0 });
-  lip.flush(g, 0.8 * u);
-  disc(true);
+  yield* lip.steps(g, 0.8 * u);
+  yield* disc(true);
   rangeRings(g, s, 0, 0, [Rb * 6.3], k);
   glyphWord(g, s, r, Rb * 6.5, 0, 4, k, pal.ink);
   const q = mulberry(s.seed * 2654435761 + 743);
@@ -2494,18 +2521,18 @@ function buildBlackHole(s) {
   };
 }
 
-function buildStar(s) {
+function* buildStar(s) {
   const b = plateBase(s, 251);
   const { g, r, u, k, min, R } = b, { pal } = s;
   const sun = s.focus.ref, Rs = min * 0.4, tint = sun.tint;
   const light = mix(tint, pal.paper, 0.42), deep = mix(tint, '#000000', 0.32);
   const q = mulberry(s.seed * 2654435761 + 761);
   const d = dotBuckets([pal.ink, pal.ink2, tint, light, deep]);
-  starfield(b, s, d, (x, y) => Math.hypot(x, y) < Rs * 1.3);
+  yield* starfield(b, s, d, (x, y) => Math.hypot(x, y) < Rs * 1.3);
   /* The corona: streamers of grain packed against the limb, thinning outwards. */
   const ph = [q() * TAU, q() * TAU, q() * TAU];
   const flow = a => 0.5 + 0.22 * Math.sin(a * 5 + ph[0]) + 0.16 * Math.sin(a * 13 + ph[1]) + 0.12 * Math.sin(a * 37 + ph[2]);
-  for (let i = 0, n = (Rs / u) * (Rs / u) * 2.2; i < n; i++) {
+  for (let i = 0, n = (Rs / u) * (Rs / u) * 2.2; i < n; i++) { if ((i & 2047) === 2047) yield;
     const a = r() * TAU, t = Math.pow(r(), 2.6), f = flow(a);
     if (r() > f) continue;
     const rad = Rs * (1.005 + t * (0.25 + f * 0.75));
@@ -2517,7 +2544,7 @@ function buildStar(s) {
     const a = q() * TAU, dd = Math.sqrt(q()) * 0.78;
     return { x: Math.cos(a) * dd, y: Math.sin(a) * dd, r: 0.03 + q() * 0.07 };
   });
-  grainDisc(d, r, 0, 0, Rs, u, {
+  yield* grainDiscSteps(d, r, 0, 0, Rs, u, {
     dens: 0.95, shade: 0, big: 0.75,
     value: (x, y) => {
       for (const o of spots) {
@@ -2552,7 +2579,7 @@ function buildStar(s) {
     }
     grainBand(d, r, 0, 0, rr - 0.5 * k, rr + 0.5 * k, u, { dens: 2, fall: 1, big: 0, colour: () => 1 });
   }
-  d.flush(g, 0.8 * u);
+  yield* d.steps(g, 0.8 * u);
   if (hasCollectors) glyphWord(g, s, r, rr + 12 * k, 0, 4, k, pal.ink);
   const proms = Array.from({ length: 13 }, () => {
     const pts = Array.from({ length: 70 }, () => ({ t: q(), jx: (q() - 0.5) * 7 * k, jy: (q() - 0.5) * 7 * k, s: (0.5 + q() * q() * 1.3) * k }));
@@ -2580,7 +2607,7 @@ function buildStar(s) {
   };
 }
 
-function buildMoon(s) {
+function* buildMoon(s) {
   const b = plateBase(s, 257);
   const { g, r, u, k, min, R } = b, { pal } = s;
   const m = s.focus.ref, parent = m.parent, Rm = min * 0.3;
@@ -2589,16 +2616,16 @@ function buildMoon(s) {
   const la = q() * TAU, lx = Math.cos(la), ly = Math.sin(la);
   const pa = la + 2.3, pd = min * 1.02, Rp = min * 0.72, px0 = Math.cos(pa) * pd, py0 = Math.sin(pa) * pd;
   const d = dotBuckets([pal.ink, pal.ink2, pal.accent]);
-  starfield(b, s, d, (x, y) => Math.hypot(x, y) < Rm * 1.02 || Math.hypot(x - px0, y - py0) < Rp);
+  yield* starfield(b, s, d, (x, y) => Math.hypot(x, y) < Rm * 1.02 || Math.hypot(x - px0, y - py0) < Rp);
   /* Its world fills the sky, its dark side simply running out of dots. */
   const field = (parent.surfaceFn || makeSurface(parent.surface, q)).field;
-  grainDisc(d, r, px0, py0, Rp, u, {
+  yield* grainDiscSteps(d, r, px0, py0, Rp, u, {
     dens: 0.62, lx, ly, shade: 1, big: 0.55,
     value: (x, y) => (field(x, y) > 0 ? 1 : 0.28),
     colour: (x, y) => (field(x, y) > 0 ? 0 : 1),
   });
   /* The moon's own ground, with craters and rays. */
-  grainDisc(d, r, 0, 0, Rm, u, {
+  yield* grainDiscSteps(d, r, 0, 0, Rm, u, {
     dens: 0.85, shade: 0, big: 0.7,
     value: (x, y) => (surf.field(x, y) + gauss(r) * 0.2 > 0 ? 1 : 0.34),
     colour: (x, y) => (surf.field(x, y) > 0 ? 0 : 1),
@@ -2615,7 +2642,7 @@ function buildMoon(s) {
     /* Roads, as lines of grain between the settlements. */
     if (s.culture === 'arc') sites.forEach((o, i) => { if (i) grainBar(d, r, sites[i - 1].x, sites[i - 1].y, o.x, o.y, 2.2 * k, u, { dens: 0.8, colour: 1 }); });
   }
-  d.flush(g, 0.8 * u);
+  yield* d.steps(g, 0.8 * u);
   if (peopled) {
     paintSettlement(g, s, r, sites, s.culture, u, k, lx, ly);
     for (const o of sites) {
@@ -2638,14 +2665,14 @@ function buildMoon(s) {
   };
 }
 
-function buildGateClose(s) {
+function* buildGateClose(s) {
   const b = plateBase(s, 263);
   const { g, r, u, k, min, R } = b, { pal } = s;
   const gate = s.focus.ref, Rg = min * 0.155, worm = gate.kind === 'wormhole', tradition = s.culture;
   const kk = Math.max(0.6, k * 0.6);
   const q = mulberry(s.seed * 2654435761 + 773);
   const d = dotBuckets([pal.ink, pal.ink2, pal.accent]);
-  starfield(b, s, d, (x, y) => Math.hypot(x, y) < Rg * (worm ? 1.1 : 0.98));
+  yield* starfield(b, s, d, (x, y) => Math.hypot(x, y) < Rg * (worm ? 1.1 : 0.98));
   if (worm) {
     /* Three arms with hard leading edges, thinning behind, like everything else here. */
     const armN = (Rg / u) * (Rg / u) * 5.5;
@@ -2697,7 +2724,7 @@ function buildGateClose(s) {
     /* A faint haze of whatever the opening holds. */
     grainBand(d, r, 0, 0, Rg * 0.6, 0, u, { dens: 0.1, fall: 1, big: 0.2, colour: () => 1 });
   }
-  d.flush(g, 0.8 * u);
+  yield* d.steps(g, 0.8 * u);
   if (worm) {
     g.fillStyle = '#030303';
     g.beginPath(); g.arc(0, 0, Rg * 0.1, 0, TAU); g.fill();
@@ -2751,7 +2778,7 @@ function buildGateClose(s) {
   };
 }
 
-function buildStation(s) {
+function* buildStation(s) {
   const b = plateBase(s, 269);
   const { g, r, u, k, min, R } = b, { pal } = s;
   const f = s.focus.ref, Rr = min * 0.135, hub = s.worlds[s.homeIdx];
@@ -2760,11 +2787,11 @@ function buildStation(s) {
   const design = { arc: ['wheel', 'double', 'cylinder'], lattice: ['truss', 'truss', 'frame'], bloom: ['pods', 'pods', 'seed'] }[s.culture][f.variant % 3];
   const q = mulberry(s.seed * 2654435761 + 787 + f.ph * 1000);
   const d = dotBuckets([pal.ink, pal.ink2, pal.accent]);
-  starfield(b, s, d, null);
+  yield* starfield(b, s, d, null);
   /* The nearest world's limb sweeps across the bottom of the view, thick at its edge. */
   const Rp = min * 1.05, py0 = min * 1.42;
   const surf = hub.surfaceFn || makeSurface(hub.surface, q);
-  for (let i = 0, n = (Rp / u) * (Rp / u) * 1.6; i < n; i++) {
+  for (let i = 0, n = (Rp / u) * (Rp / u) * 1.6; i < n; i++) { if ((i & 2047) === 2047) yield;
     const a = r() * TAU, t = Math.sqrt(r()), x = Math.cos(a) * t * Rp, y = Math.sin(a) * t * Rp;
     if (y > -Rp * 0.4) continue;
     const land = surf.field(x / Rp, y / Rp) > 0;
@@ -2789,7 +2816,7 @@ function buildStation(s) {
     /* Long mirrors standing off a spinning cylinder, as in O'Neill's designs. */
     for (const m of [-1, 1]) grainBar(d, r, -Rr * 1.55, m * Rr * 0.3, Rr * 0.55, m * Rr * 0.92, 2.6 * kk, u, { dens: 1.1, colour: 1 });
   }
-  d.flush(g, 0.8 * u);
+  yield* d.steps(g, 0.8 * u);
   glyphWord(g, s, r, -Rr * 0.7, -Rr * 1.5, 5, kk, pal.accent);
 
   const dockA = { x: Math.cos(0.6) * Rr, y: -Math.sin(0.6) * Rr, r: 2.6 * kk, kind: 'port' };
@@ -2880,7 +2907,7 @@ function buildStation(s) {
   };
 }
 
-function buildAsteroid(s) {
+function* buildAsteroid(s) {
   const b = plateBase(s, 271);
   const { g, r, u, k, min, R } = b, { pal } = s;
   const f = s.focus.ref, Ra = min * 0.135;
@@ -2890,9 +2917,9 @@ function buildAsteroid(s) {
   const edge = a => Ra * (0.82 + 0.16 * Math.sin(a * 2 + lobes[0]) + 0.08 * Math.sin(a * 5 + lobes[1]) + 0.04 * Math.sin(a * 11 + lobes[2]));
   const la = q() * TAU, lx = Math.cos(la), ly = Math.sin(la);
   const d = dotBuckets([pal.ink, pal.ink2, pal.accent]);
-  starfield(b, s, d, (x, y) => Math.hypot(x, y) < edge(Math.atan2(y, x)) * 1.02);
+  yield* starfield(b, s, d, (x, y) => Math.hypot(x, y) < edge(Math.atan2(y, x)) * 1.02);
   /* Its neighbours in the belt, each a little shaded lump of grain. */
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < 30; i++) { if ((i & 2047) === 2047) yield;
     const a = q() * TAU, dist = Ra * (1.5 + q() * 3.4), sz = (1.4 + q() * q() * 13) * kk;
     const x0 = Math.cos(a) * dist, y0 = Math.sin(a) * dist * 0.55;
     const wob = q() * TAU;
@@ -2900,7 +2927,7 @@ function buildAsteroid(s) {
   }
   /* The rock: lit one side, grain running out into shadow, with a crisp silhouette. */
   const surf = makeSurface('barren', q);
-  for (let i = 0, n = (Ra / u) * (Ra / u) * 3; i < n; i++) {
+  for (let i = 0, n = (Ra / u) * (Ra / u) * 3; i < n; i++) { if ((i & 2047) === 2047) yield;
     const x = (r() * 2 - 1) * Ra * 1.08, y = (r() * 2 - 1) * Ra * 1.08;
     const a = Math.atan2(y, x), lim = edge(a), t = Math.hypot(x, y) / lim;
     if (t > 1) continue;
@@ -2912,7 +2939,7 @@ function buildAsteroid(s) {
   }
   /* Rigs on the rim, shaped by the tradition. */
   const rigs = [];
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 5; i++) { if ((i & 2047) === 2047) yield;
     const a = q() * TAU, dd = edge(a), h = (10 + q() * 13) * kk, ca = Math.cos(a), sa = Math.sin(a);
     if (s.culture === 'bloom') {
       /* Stalks with a bulb on the end. */
@@ -2932,7 +2959,7 @@ function buildAsteroid(s) {
       grainBar(d, r, Math.cos(a) * m, Math.sin(a) * m, Math.cos(a2) * m, Math.sin(a2) * m, 1.2 * kk, u, { dens: 0.7, colour: 1 });
     }
   }
-  d.flush(g, 0.8 * u);
+  yield* d.steps(g, 0.8 * u);
   const sites = [];
   for (let i = 0, c = 4 + Math.floor(q() * 5); i < c; i++) {
     const a = q() * TAU, dd = Math.sqrt(q()) * Ra * 0.6;
@@ -2961,16 +2988,16 @@ function buildAsteroid(s) {
   };
 }
 
-function buildCloseup(s) {
+function* buildCloseup(s) {
   const kind = s.focus.kind;
-  if (kind === 'blackhole') return buildBlackHole(s);
-  if (kind === 'star') return buildStar(s);
-  if (kind === 'pulsar') return buildPulsar(s);
-  if (kind === 'moon') return buildMoon(s);
-  if (kind === 'gate' || kind === 'wormhole') return buildGateClose(s);
-  if (kind === 'station') return buildStation(s);
-  if (kind === 'asteroid') return buildAsteroid(s);
-  return buildWorld(s);
+  if (kind === 'blackhole') return yield* buildBlackHole(s);
+  if (kind === 'star') return yield* buildStar(s);
+  if (kind === 'pulsar') return yield* buildPulsar(s);
+  if (kind === 'moon') return yield* buildMoon(s);
+  if (kind === 'gate' || kind === 'wormhole') return yield* buildGateClose(s);
+  if (kind === 'station') return yield* buildStation(s);
+  if (kind === 'asteroid') return yield* buildAsteroid(s);
+  return yield* buildWorld(s);
 }
 
 /* What the camera could visit right now: only things that exist, and that the chart can show. */
@@ -3060,7 +3087,7 @@ function focusPosition(s, t) {
   return [VX, VY];
 }
 
-function buildNeighbourhood(s) {
+function* buildNeighbourhood(s) {
   const b = plateBase(s, 223);
   const { g, r, R, u, k, min } = b, { pal } = s;
   const mx = (r() - 0.5) * min * 0.3, my = (r() - 0.5) * min * 0.3;
@@ -3068,7 +3095,7 @@ function buildNeighbourhood(s) {
   const fade = (x, y) => 1 - smooth(0.68, 0.98, Math.hypot(x, y) / R);
 
   /* Gas clouds as stipple */
-  for (let c = 0; c < 6; c++) {
+  for (let c = 0; c < 6; c++) { if ((c & 2047) === 2047) yield;
     const a = r() * TAU, d = Math.sqrt(r()) * R * 0.8;
     const ox = Math.cos(a) * d, oy = Math.sin(a) * d;
     const w = R * (0.12 + r() * 0.22), h = w * (0.35 + r() * 0.5), rot = r() * TAU;
@@ -3083,17 +3110,17 @@ function buildNeighbourhood(s) {
   }
   /* Faint field stars */
   const field = (R / u) * (R / u) * 0.12;
-  for (let i = 0; i < field; i++) {
+  for (let i = 0; i < field; i++) { if ((i & 2047) === 2047) yield;
     const a = r() * TAU, d = Math.sqrt(r()) * R;
     const x = Math.cos(a) * d, y = Math.sin(a) * d;
     if (r() > fade(x, y)) continue;
     dots.add(r() < 0.6 ? 1 : 0, x, y, (0.55 + r() * 0.35) * u);
   }
-  dots.flush(g, 0.8 * u);
+  yield* dots.steps(g, 0.8 * u);
 
   const stars = [];
   const count = 44 + Math.floor(r() * 26);
-  for (let t = 0; t < count * 30 && stars.length < count; t++) {
+  for (let t = 0; t < count * 30 && stars.length < count; t++) { if ((t & 2047) === 2047) yield;
     const a = r() * TAU, d = Math.sqrt(r()) * R * 0.92;
     const x = Math.cos(a) * d, y = Math.sin(a) * d;
     if (Math.hypot(x - mx, y - my) < 34 * k) continue;
@@ -3141,7 +3168,7 @@ function buildNeighbourhood(s) {
     lanes.push(makeLane(tq, here, o, 2 + Math.floor(tq() * 3), 70, j < 3));
     if (tq() < 0.5) gates.push({ x: o.x + o.rad + 11 * k, y: o.y - o.rad - 11 * k, r: 7 * k, kind: tq() < 0.6 ? 'gate' : 'wormhole', spin: 0.25 });
   });
-  for (let j = 0; j < 6 && stars.length > 2; j++) {
+  for (let j = 0; j < 6 && stars.length > 2; j++) { if ((j & 2047) === 2047) yield;
     const a = stars[Math.floor(tq() * stars.length)], c = stars[Math.floor(tq() * stars.length)];
     if (a !== c) lanes.push(makeLane(tq, a, c, 1 + Math.floor(tq() * 2), 90, false));
   }
@@ -3151,7 +3178,7 @@ function buildNeighbourhood(s) {
   return { R, mx, my, spin: 0, k, lanes, gates, comms, tw: twinkles(r, Math.min(stars.length, 40), () => { const o = stars[i++]; return [o.x, o.y, 0]; }) };
 }
 
-function buildGalaxy(s) {
+function* buildGalaxy(s) {
   const b = plateBase(s, 227);
   const { g, r, R, u, k, min, max } = b, { pal } = s;
   const Rg = galaxyRadius(s);
@@ -3163,7 +3190,7 @@ function buildGalaxy(s) {
   const tw = [];
   const armWeights = [];
   for (let i = 0; i < arms; i++) armWeights.push({ fall: 1.7 + r() * 2.2, width: 0.32 + r() * 0.5, ph: r() * TAU, f: 14 + r() * 22 });
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < n; i++) { if ((i & 2047) === 2047) yield;
     const t = Math.pow(r(), 0.72);
     const rad = 0.05 + t * 0.97;
     const arm = Math.floor(r() * arms);
@@ -3179,12 +3206,12 @@ function buildGalaxy(s) {
     if (tw.length < 200 && r() < 0.0012) tw.push([x, y, pick < 0.2 ? 1 : 0]);
   }
   /* A diffuse halo */
-  for (let i = 0; i < n * 0.16; i++) {
+  for (let i = 0; i < n * 0.16; i++) { if ((i & 2047) === 2047) yield;
     const a = r() * TAU, d = Math.pow(r(), 0.7) * Rg * 1.08;
     if (r() > 1 - smooth(0.7, 1.08, d / Rg)) continue;
     dots.add(1, Math.cos(a) * d, Math.sin(a) * d, (0.55 + r() * 0.4) * u);
   }
-  dots.flush(g, 0.8 * u);
+  yield* dots.steps(g, 0.8 * u);
 
   /* The core is a flat disc, like their suns. */
   const core = Rg * 0.075;
@@ -3225,7 +3252,7 @@ function buildGalaxy(s) {
   const here = { x: mx, y: my };
   const lanes = [], gates = [];
   const pairs = 3 + Math.floor(tq() * 3);
-  for (let j = 0; j < pairs; j++) {
+  for (let j = 0; j < pairs; j++) { if ((j & 2047) === 2047) yield;
     const mouth = Object.assign(armPoint(Math.floor(tq() * arms), 0.25 + tq() * 0.7), { r: 7 * k, kind: tq() < 0.7 ? 'wormhole' : 'gate', spin: 0.08 });
     gates.push(mouth);
     lanes.push(makeLane(tq, j < 3 ? here : gates[Math.floor(tq() * gates.length)], mouth, 2 + Math.floor(tq() * 2), 200, j < 2));
@@ -3255,7 +3282,7 @@ function stampGalaxy(dots, r, x, y, size, u, spiral) {
   }
 }
 
-function buildGroup(s) {
+function* buildGroup(s) {
   const b = plateBase(s, 229);
   const { g, r, R, u, k, min } = b, { pal } = s;
   const a0 = r() * TAU, d0 = min * (0.08 + r() * 0.14);
@@ -3265,20 +3292,20 @@ function buildGroup(s) {
   const big = { x: mx - Math.cos(a0) * min * 0.3, y: my - Math.sin(a0) * min * 0.3, size: min * 0.11, spiral: true };
   members.push(big);
   const count = 26 + Math.floor(r() * 14);
-  for (let t = 0; t < count * 40 && members.length < count; t++) {
+  for (let t = 0; t < count * 40 && members.length < count; t++) { if ((t & 2047) === 2047) yield;
     const a = r() * TAU, d = Math.pow(r(), 0.65) * R * 0.92;
     const x = Math.cos(a) * d, y = Math.sin(a) * d;
     const size = min * (0.012 + Math.pow(r(), 3) * 0.07);
     if (members.some(o => Math.hypot(o.x - x, o.y - y) < o.size + size + 12 * k)) continue;
     members.push({ x, y, size, spiral: r() < 0.45 });
   }
-  for (let i = 0; i < (R / u) * (R / u) * 0.1; i++) {
+  for (let i = 0; i < (R / u) * (R / u) * 0.1; i++) { if ((i & 2047) === 2047) yield;
     const a = r() * TAU, d = Math.pow(r(), 0.7) * R * 0.98;
     if (r() > 1 - smooth(0.6, 0.98, d / R)) continue;
     dots.add(1, Math.cos(a) * d, Math.sin(a) * d, (0.55 + r() * 0.3) * u);
   }
-  for (const o of members) stampGalaxy(dots, r, o.x, o.y, o.size, u, o.spiral);
-  dots.flush(g, 0.8 * u);
+  for (const o of members) { stampGalaxy(dots, r, o.x, o.y, o.size, u, o.spiral); yield; }
+  yield* dots.steps(g, 0.8 * u);
   g.strokeStyle = alpha(pal.ink, 0.3);
   g.lineWidth = 0.7 * k;
   g.beginPath();
@@ -3301,13 +3328,13 @@ function buildGroup(s) {
   return { R, mx, my, spin: 0, k, lanes, gates, comms, tw: twinkles(r, Math.min(members.length, 40), () => { const o = members[i++]; return [o.x, o.y, 0]; }) };
 }
 
-function buildSupercluster(s) {
+function* buildSupercluster(s) {
   const b = plateBase(s, 233);
   const { g, r, R, u, k, min } = b, { pal, W, H } = s;
   const hw = W / 2 + 40, hh = H / 2 + 40;
   const nodes = [];
   const count = Math.round(clamp(W * H / 11000, 34, 110));
-  for (let t = 0; t < count * 60 && nodes.length < count; t++) {
+  for (let t = 0; t < count * 60 && nodes.length < count; t++) { if ((t & 2047) === 2047) yield;
     const x = (r() * 2 - 1) * hw, y = (r() * 2 - 1) * hh;
     if (nodes.some(o => Math.hypot(o.x - x, o.y - y) < min * 0.07)) continue;
     nodes.push({ x, y, mass: 0.25 + Math.pow(r(), 3) * 2.2 });
@@ -3362,7 +3389,7 @@ function buildSupercluster(s) {
   }
   /* The voids are not perfectly empty. */
   for (let i = 0; i < total * 0.05; i++) dots.add(1, (r() * 2 - 1) * hw, (r() * 2 - 1) * hh, 0.55 * u);
-  dots.flush(g, 0.8 * u);
+  yield* dots.steps(g, 0.8 * u);
 
   const centre = nodes.slice().sort((a, c) => Math.hypot(a.x, a.y) - Math.hypot(c.x, c.y));
   const home = centre[Math.floor(r() * Math.min(4, centre.length))];
@@ -3394,20 +3421,56 @@ function galaxyRadius(s) {
   return Math.min(R * 0.92, Math.max(min * 0.47, max * 0.34));
 }
 /* Close-ups are big, so only the home world and the last few stay in memory. */
-function rememberCloseup(s, meta) {
-  s.closeups[s.focus.id] = meta;
-  const ids = Object.keys(s.closeups).filter(id => id !== 'home' && id !== s.focus.id);
+function rememberCloseup(s, meta, id) {
+  s.closeups[id] = meta;
+  const ids = Object.keys(s.closeups).filter(k => k !== 'home' && k !== id && k !== s.focus.id);
   while (ids.length > (LITE ? 0 : 2)) delete s.closeups[ids.shift()];
 }
+/* Plates are painted a step at a time. Asked for directly, the work is finished on the spot; queued with
+   queuePlate, it advances a little each frame. Both share one generator, so nothing is painted twice. */
 function plateDisc(s, level) {
   s.plates = s.plates || {};
   if (s.plates[level]) return s.plates[level];
+  drain(plateWork(s, level, 'disc'));
+  return s.plates[level];
+}
+function plate(s, level) {
+  plateDisc(s, level);
+  if (!s.plates[level].rest) drain(plateWork(s, level, 'rest'));
+  return s.plates[level];
+}
+function plateWork(s, level, part, focus) {
+  focus = level === -1 ? focus || s.focus : null;
+  const key = part + level + (focus ? ':' + focus.id : '');
+  s.plateJobs = s.plateJobs || {};
+  if (!s.plateJobs[key]) {
+    const inner = part === 'disc' ? plateDiscGen(s, level, focus) : plateRestGen(s, level, focus);
+    s.plateJobs[key] = (function* () { try { return yield* inner; } finally { delete s.plateJobs[key]; } })();
+  }
+  return s.plateJobs[key];
+}
+const plateOf = (s, level, focus) => (level === -1 ? s.closeups[focus.id] : s.plates && s.plates[level]);
+function plateReady(s, level, focus) { const p = plateOf(s, level, level === -1 ? focus || s.focus : null); return !!(p && p.rest); }
+/* Each step runs with its own canvas and, for a close-up, its own subject, whatever else changed in between. */
+function* holding(s, g, focus, gen) {
+  for (;;) {
+    const keep = s.focus;
+    plateG = g;
+    if (focus) s.focus = focus;
+    let x;
+    try { x = gen.next(); } finally { s.focus = keep; }
+    if (x.done) return x.value;
+    yield;
+  }
+}
+function* plateDiscGen(s, level, focus) {
+  s.plates = s.plates || {};
   const R = Math.hypot(s.W, s.H) * 0.55;
   const { c, g: raw, q } = square(R * 2, s, CAP_PLATE);
   raw.setTransform(q, 0, 0, q, q * R, q * R);
   const g = recording(raw);
-  plateG = g;
-  const meta = BUILDERS[level](s);
+  const meta = yield* holding(s, g, focus, BUILDERS[level](s));
+  yield;
   /* Anything painted past the sprite's edge would show as a straight cut while shrinking, so fade to round. */
   raw.save();
   raw.setTransform(1, 0, 0, 1, 0, 0);
@@ -3418,18 +3481,21 @@ function plateDisc(s, level) {
   raw.fillStyle = fadeOut;
   raw.fillRect(0, 0, c.width, c.height);
   raw.restore();
-  meta.mips = mipsOf(c);
+  meta.mips = yield* mipsGen(c);
   meta.ops = g.__ops;
   meta.level = level;
   meta.sunX = 1; meta.sunY = 0;
-  s.plates[level] = meta;
-  if (level === -1) rememberCloseup(s, meta);
-  if (s.civState) applyPlateCiv(s, meta);
+  if (level === -1) {
+    rememberCloseup(s, meta, focus.id);
+    if (s.focus.id === focus.id) s.plates[-1] = meta;
+  } else s.plates[level] = meta;
+  if (s.civState) { const keep = s.focus; s.focus = focus || keep; try { applyPlateCiv(s, meta); } finally { s.focus = keep; } }
   return meta;
 }
-function plate(s, level) {
-  const p = plateDisc(s, level);
-  if (p.rest) return p;
+function* plateRestGen(s, level, focus) {
+  let p = plateOf(s, level, focus);
+  if (!p) { yield* plateWork(s, level, 'disc', focus); p = plateOf(s, level, focus); }
+  if (!p || p.rest) return p;
   /* The galaxy turns, so its print is a square big enough to turn inside the frame. */
   const hw = level === 2 ? galaxyRadius(s) * 1.18 : s.W / 2;
   const hh = level === 2 ? galaxyRadius(s) * 1.18 : s.H / 2;
@@ -3438,8 +3504,7 @@ function plate(s, level) {
   c.height = Math.round(hh * 2 * s.dpr);
   const raw = c.getContext('2d');
   raw.setTransform(s.dpr, 0, 0, s.dpr, s.dpr * hw, s.dpr * hh);
-  plateG = raw;
-  BUILDERS[level](s);
+  yield* holding(s, raw, focus, BUILDERS[level](s));
   p.rest = c;
   p.hw = hw;
   p.hh = hh;
@@ -3724,7 +3789,7 @@ function render(t) {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.globalAlpha = 1;
   ctx.fillStyle = s.pal.paper;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillRect(0, 0, s.W * s.dpr, s.H * s.dpr);
 
   let L = Math.floor(cam.z), f = cam.z - L;
   if (L >= LEVEL_MAX) { L = LEVEL_MAX - 1; f = 1; }
@@ -3759,14 +3824,18 @@ function render(t) {
 
 /* The camera wanders on its own: a random scale, a slow journey, a random pause. */
 const ASKED_JOURNEY = 7;
-function goTo(f) {
+function goTo(f, dur) {
   const s = sys;
-  if (cam.z < 0) { cam.visitNext = f; cam.from = cam.z; cam.to = 0; cam.u = 0; cam.dur = ASKED_JOURNEY * 0.7; return; }
+  /* Asked for, so it answers promptly whatever the wandering pace is. */
+  dur = dur || ASKED_JOURNEY;
+  if (cam.z < 0) { cam.visitNext = f; cam.visitDur = dur; cam.from = cam.z; cam.to = 0; cam.u = 0; cam.dur = ASKED_JOURNEY * 0.7; return; }
   setFocus(s, f);
-  plate(s, -1);
   s.focusReady = false;
+  /* Paint the close-up first, a little each frame, and set off once it's ready (see stepCam). */
+  if (!plateReady(s, -1, f)) { cam.waitFor = { f, dur }; queuePlate(s, -1, null, true); return; }
+  cam.waitFor = null;
   cam.from = cam.z; cam.to = -1; cam.u = 0;
-  cam.dur = ASKED_JOURNEY; /* asked for, so it answers promptly whatever the wandering pace is */
+  cam.dur = dur;
 }
 let lastCamT = 0;
 function stepCam(dt) {
@@ -3782,10 +3851,16 @@ function stepCam(dt) {
       cam.z = cam.to;
       cam.hold = (pacing.pMin + Math.random() * (pacing.pMax - pacing.pMin)) * (cam.to === 0 ? 1.6 : 1);
       cam.planned = null;
-      if (cam.visitNext) { const f = cam.visitNext; cam.visitNext = null; goTo(f); return; }
+      if (cam.visitNext) { const f = cam.visitNext; cam.visitNext = null; goTo(f, cam.visitDur); return; }
       if (followEvents) eventArrived();
     }
     updateScale();
+    return;
+  }
+  if (cam.waitFor) {
+    const w = cam.waitFor;
+    if (sys.focus.id !== w.f.id) cam.waitFor = null;
+    else if (plateReady(sys, -1, w.f)) { cam.waitFor = null; goTo(w.f, w.dur); }
     return;
   }
   if (cam.stopAtChart) { cam.stopAtChart = false; cam.auto = false; return; }
@@ -3847,11 +3922,10 @@ function planNext(s) {
   cam.planned = target;
   for (const l of [1, 2, 3, 4]) {
     if (target >= l || here >= l) {
-      queueJob(s, () => plateDisc(s, l));
-      queueJob(s, () => plate(s, l));
+      queuePlate(s, l);
     }
   }
-  if (target === -1 && here >= 0) queueJob(s, () => prepareFocusNow(s));
+  if (target === -1 && here >= 0) queueJob(s, () => prepareFocusNow(s), 'chooseFocus');
   if (cam.viewTo) { queueWork(s, 'homeDisc', homeDiscGen); }
 }
 function prepareFocusNow(s) {
@@ -3859,40 +3933,68 @@ function prepareFocusNow(s) {
   const next = chooseFocus(s);
   if (!next) return;
   setFocus(s, next);
-  plateDisc(s, -1);
-  queueJob(s, () => { plate(s, -1); s.focusReady = true; });
+  queuePlate(s, -1, () => { if (s.focus.id === next.id) { s.plates[-1] = s.closeups[next.id]; s.focusReady = true; } }, true);
 }
 
-let startedAt = 0, lastDraw = 0, raf = 0, slowFrames = 0;
+let startedAt = 0, lastDraw = 0, raf = 0, slowFrames = 0, frameTimer = 0, framesDrawn = 0;
+/* Frames a second at rest and while the camera moves. The Mac app lowers these on battery. */
+const frameRate = { rest: 30, move: 60 };
+/* Sleep between frames with a timer and only then ask for a frame, so a slow frame rate also means
+   the page wakes up less often, instead of being called at the display's full rate and skipping. */
+function nextFrame(wait) {
+  clearTimeout(frameTimer);
+  cancelAnimationFrame(raf);
+  /* raf stays non-zero while a frame is on its way, by timer or by request, so "is it running?" checks still work. */
+  if (wait > 10) { raf = -1; frameTimer = setTimeout(() => { frameTimer = 0; raf = requestAnimationFrame(loop); }, wait - 7); }
+  else raf = requestAnimationFrame(loop);
+}
+function stopFrames() { clearTimeout(frameTimer); frameTimer = 0; cancelAnimationFrame(raf); raf = 0; }
+/* Errors inside a frame are kept with their stack: WebKit hides the details of uncaught ones on file pages. */
+let errorCount = 0;
 function loop(now) {
-  raf = requestAnimationFrame(loop);
-  /* Up to 60 frames a second while the camera moves on capable devices; otherwise 30, which
-     is plenty for slow orbits and kinder to batteries. */
-  const moving = cam.u < 1 || cam.k !== cam.viewTo || (crumbles && crumbleBusy(sys));
-  if (now - lastDraw < (moving && !LITE && quality > 0.7 ? 15 : 32)) return;
+  try { frame(now); } catch (e) {
+    errorCount++;
+    errorLog.push(e.message + ' | ' + String(e.stack || '').split('\n').slice(0, 3).join(' < '));
+    if (errorLog.length > 8) errorLog.shift();
+    if (!raf) nextFrame(33);
+  }
+}
+function frame(now) {
+  const moving = cam.u < 1 || cam.k !== cam.viewTo || (crumbles && crumbleBusy(sys)) || !!fade;
+  const target = 1000 / (moving && !LITE && quality > 0.7 ? frameRate.move : frameRate.rest);
+  if (now - lastDraw < target - 3) { nextFrame(target - (now - lastDraw)); return; }
+  nextFrame(target);
   const gap = now - lastDraw;
+  framesDrawn++;
+  const t0 = performance.now(), marks = [];
   /* Steady slow frames lower the detail; a long run of good ones slowly brings it back. */
-  slowFrames = gap > 48 ? slowFrames + 1 : Math.max(0, slowFrames - 0.25);
+  slowFrames = gap > target * 1.5 ? slowFrames + 1 : Math.max(0, slowFrames - 0.25);
   if (slowFrames > 6) { quality = Math.max(0.3, quality * 0.8); slowFrames = 0; }
-  else if (gap < 36 && quality < 1) quality = Math.min(1, quality + 0.0008);
+  else if (gap < target * 1.12 && quality < 1) quality = Math.min(1, quality + 0.0008);
   const dt = clamp(gap / 1000, 0, 0.1);
   lastDraw = now;
   clock += dt;
   simT += dt * simSpeed;
+  settleView();
   stepCam(dt);
+  marks.push('cam', performance.now() - t0);
   if (swapDue() && !pendingBuild && cam.z === 0 && cam.u >= 1) { scheduleSwap(); swapSystem(newSeed()); }
-  if (pendingBuild) advanceBuild(cam.u < 1 ? 5 : 9);
-  else runBacklog(cam.u < 1 ? 3 : 7);
+  /* Background painting gets a slice of each frame: small while moving, more at rest, where frames are further apart. */
+  const slice = cam.u < 1 ? 4 : clamp(target * 0.3, 7, 20);
+  if (pendingBuild) advanceBuild(slice + 2);
+  else runBacklog(slice);
+  marks.push(pendingBuild ? 'build' : 'backlog:' + lastJob, performance.now() - t0);
   sound.bass *= 0.86; sound.level *= 0.9;
   lastT = spanInfo ? (Date.now() / 1000) * simSpeed : simT;
   lastCamT = lastT;
   if (crumbles) crumbleT = startAt + lastT;
   render(startAt + lastT);
+  marks.push('render z' + cam.z.toFixed(2), performance.now() - t0);
   if (fade) {
     const left = 1 - (now - fade.at) / 3000;
     if (left <= 0) fade = null;
     else {
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      screenIdentity();
       ctx.globalAlpha = left * left * (3 - 2 * left);
       ctx.drawImage(fade.c, 0, 0);
       ctx.globalAlpha = 1;
@@ -3900,11 +4002,28 @@ function loop(now) {
   }
   if (wallpaper) {
     drawOverlays();
+    marks.push('overlays', performance.now() - t0);
     civTimer -= dt;
     if (followEvents) eventTick();
+    marks.push('events', performance.now() - t0);
     if (crumbles) crumbleTick(sys);
-    if (civTimer <= 0) { civTimer = sys.civState && sys.civState.arc ? 4 : 15; applyCiv(false); }
+    marks.push('crumble', performance.now() - t0);
+    if (civTimer <= 0) { civTimer = sys.civState && sys.civState.arc ? 4 : 15; applyCiv(false); marks.push('civ', performance.now() - t0); }
   }
+  noteSlow(marks, t0);
+}
+/* The slowest recent frames and what took the time, and any page errors, for orrery.state(). */
+const slowLog = [], errorLog = [];
+window.addEventListener('error', e => { errorLog.push(String(e.message) + ' @' + e.lineno); if (errorLog.length > 8) errorLog.shift(); });
+let lastJob = '', stepAt = '';
+function noteSlow(marks, t0) {
+  const ms = performance.now() - t0;
+  if (ms < 40) return;
+  let prev = 0, parts = [];
+  for (let i = 0; i < marks.length; i += 2) { parts.push(marks[i] + ' ' + Math.round(marks[i + 1] - prev)); prev = marks[i + 1]; }
+  parts.push('rest ' + Math.round(ms - prev));
+  slowLog.push(Math.round(ms) + 'ms: ' + parts.join(', '));
+  if (slowLog.length > 12) slowLog.shift();
 }
 
 /* ---- Wallpaper mode: systems change on their own, and the Mac app steers through window.orrery ---- */
@@ -3915,23 +4034,47 @@ const swapDue = () => wallpaper && clock >= nextSwap;
 function scheduleSwap() { nextSwap = changeEvery > 0 ? clock + changeEvery * (0.85 + Math.random() * 0.3) : Infinity; }
 let pendingBuild = null;
 function swapSystem(seed) {
-  /* Paint the new one a slice at a time while the old one keeps moving. The newest request wins. */
-  if (paused || frozen) { swapNow(seed, null); return; }
-  pendingBuild = { seed, gen: buildGen(seed, sys.W, sys.H) };
+  /* Paint the new one a slice at a time while the old one keeps moving. The newest request wins.
+     Its view is decided now, so a home sky is painted before it's shown rather than on the spot. */
+  const view = viewMode === 'random' ? (Math.random() < 0.35 ? 1 : 0) : pendingView !== null ? pendingView : cam.viewTo;
+  if (paused || frozen) { swapNow(seed, null, view); return; }
+  pendingBuild = { seed, view, gen: buildFull(seed, sys.W, sys.H, view) };
+}
+function* buildFull(seed, W, H, view) {
+  const b = yield* buildGen(seed, W, H);
+  if (view) {
+    b.vs = (Math.min(W, H) * 0.34) / b.worlds[b.homeIdx].a;
+    yield;
+    b.homeLayer = yield* homeLayerGen(b);
+  }
+  return b;
+}
+/* Home view needs its own sky: paint it in the background first, then cross over to it. */
+let pendingView = null;
+function requestView(v) {
+  pendingView = null;
+  if (!v || sys.homeLayer || frozen) { cam.viewTo = v; if (v) { homeLayer(sys); queueWork(sys, 'homeDisc', homeDiscGen); } return; }
+  pendingView = v;
+  backlog.unshift({ s: sys, key: 'homeDisc', make: homeDiscGen });
+  backlog.unshift({ s: sys, key: 'homeLayer', make: homeLayerGen });
+}
+function settleView() {
+  if (pendingView !== null && sys.homeLayer) { cam.viewTo = pendingView; pendingView = null; }
 }
 function advanceBuild(ms) {
   const until = performance.now() + ms;
   while (pendingBuild && performance.now() < until) {
     const job = pendingBuild, x = job.gen.next();
-    if (x.done) { pendingBuild = null; swapNow(job.seed, x.value); return; }
+    if (x.done) { pendingBuild = null; swapNow(job.seed, x.value, job.view); return; }
   }
 }
-function swapNow(seed, built) {
+function swapNow(seed, built, view) {
   const c = document.createElement('canvas');
   c.width = canvas.width;
   c.height = canvas.height;
   c.getContext('2d').drawImage(canvas, 0, 0);
-  if (viewMode === 'random') cam.viewTo = Math.random() < 0.35 ? 1 : 0;
+  if (view !== undefined) cam.viewTo = view;
+  pendingView = null;
   start(seed, built);
   fade = { c, at: performance.now() };
   scheduleSwap();
@@ -4126,7 +4269,10 @@ function applyCiv(first) {
   s.worlds.forEach(o => { o.shattered = s.ended && (o.living || o.home) && !o.armed; });
   /* Close-ups were painted for the old state, so paint fresh ones when the story moves on. */
   const chapter = (c.final ? c.final.kind : c.arc ? c.arc.kind : 'peace') + taken;
-  if (s.chapter && s.chapter !== chapter && cam.z >= 0) { s.closeups = {}; s.plates && delete s.plates[-1]; s.focusReady = false; }
+  if (s.chapter && s.chapter !== chapter && cam.z >= 0) {
+    s.closeups = {}; s.plates && delete s.plates[-1]; s.focusReady = false;
+    for (const k of Object.keys(s.plateJobs || {})) if (k.includes('-1')) delete s.plateJobs[k];
+  }
   s.chapter = chapter;
   const hub = s.worlds[s.homeIdx];
   s.gates.forEach((g, i) => {
@@ -4164,7 +4310,7 @@ function applyCiv(first) {
     ftl: silent ? [] : s.comms.ftl.filter(f => reachable(f.a) && reachable(f.b)),
     radio: quiet ? [] : s.comms.radio.filter(w => (w.src === hub || w.src.settled !== false) && !w.src.gone),
   };
-  if (s.plates) for (const k of Object.keys(s.plates)) applyPlateCiv(s, s.plates[k]);
+  if (s.plates) for (const k of Object.keys(s.plates)) if (s.plates[k]) applyPlateCiv(s, s.plates[k]);
   /* Anything new since last time plays out on screen. */
   if (!first && lastEvent) {
     const i = c.events.findIndex(e => e.d === lastEvent.d && e.text === lastEvent.text);
@@ -4557,8 +4703,37 @@ function drawChronicle(s) {
     return flipper.state === 'toEnglish' ? u : 1 - u;
   };
   const rows = flipper.rows;
-  let y = s.H - PANEL_BOTTOM - rows.length * ROW_H;
-  ctx.setTransform(s.dpr, 0, 0, s.dpr, 0, 0);
+  const top = s.H - PANEL_BOTTOM - rows.length * ROW_H;
+  /* At rest the panel doesn't change, so it's painted once and stamped; only a flip draws letter by letter. */
+  if (flipper.state === 'script' || flipper.state === 'english') {
+    const w = Math.max(0, ...rows.map(r => r.text.length)) * CELL_W + 20;
+    const key = [s.seed, pal.name, pal.accent, flipper.state, s.W, s.H, s.dpr, PANEL_LEFT, rows.map(r => r.text).join('|')].join(';');
+    stampPanel('chronicle', key, PANEL_LEFT - 8, Math.floor(top - 6), w, rows.length * ROW_H + 12, g => paintChronicle(g, s, rows, top, turn));
+  } else {
+    ctx.setTransform(s.dpr, 0, 0, s.dpr, 0, 0);
+    paintChronicle(ctx, s, rows, top, turn);
+  }
+}
+/* Text panels change rarely, so each is painted once into its own small canvas and stamped every frame. */
+const panelCache = {};
+function stampPanel(slot, key, x, y, w, h, paint) {
+  const dpr = sys.dpr;
+  let c = panelCache[slot];
+  if (!c || c.key !== key) {
+    c = c || (panelCache[slot] = { canvas: document.createElement('canvas') });
+    c.canvas.width = Math.max(1, Math.ceil(w * dpr));
+    c.canvas.height = Math.max(1, Math.ceil(h * dpr));
+    const g = c.canvas.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, -x * dpr, -y * dpr);
+    paint(g);
+    c.key = key;
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(c.canvas, Math.round(x * dpr), Math.round(y * dpr));
+}
+function paintChronicle(ctx, s, rows, top, turn) {
+  const { pal } = s;
+  let y = top;
   ctx.font = '500 10.5px ui-monospace, SFMono-Regular, Menlo, monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -4642,14 +4817,14 @@ function setPaused(on) {
   paused = on;
   if (on) {
     pausedAt = performance.now();
-    cancelAnimationFrame(raf);
+    stopFrames();
     return;
   }
   const now = performance.now();
   startedAt += now - pausedAt;
   lastDraw = now;
   if (fade) fade.at += now - pausedAt;
-  if (!frozen) raf = requestAnimationFrame(loop);
+  if (!frozen) nextFrame(0);
 }
 if (wallpaper) {
   document.body.classList.add('wallpaper');
@@ -4659,8 +4834,7 @@ if (wallpaper) {
     setView(mode) {
       viewMode = mode;
       if (mode === 'random') return;
-      cam.viewTo = mode === 'home' ? 1 : 0;
-      if (cam.viewTo) { homeLayer(sys); homeDisc(sys); }
+      requestView(mode === 'home' ? 1 : 0);
     },
     setZoom(on) {
       cam.auto = on && !frozen;
@@ -4668,6 +4842,7 @@ if (wallpaper) {
     },
     setChange(seconds) { changeEvery = seconds; scheduleSwap(); },
     setPaused,
+    setFrameRate(rest, move) { frameRate.rest = clamp(rest, 5, 60); frameRate.move = clamp(move, frameRate.rest, 120); },
     load: loadSeed,
     setCiv(founded, rate) { civFounded = founded === null || founded === undefined ? civFounded : founded; civRate = rate || 1; applyCiv(true); },
     setRate(rate) { civRate = rate; civTimer = 0; },
@@ -4734,12 +4909,11 @@ if (wallpaper) {
         ev.state = 'there'; ev.wasOff = wasOff; ev.last = performance.now();
         return 'back';
       }
-      const f = pickAt(clientX - r.left, clientY - r.top);
+      const f = pickAt(clientX - r.left + (spanInfo ? spanInfo[0] : 0), clientY - r.top + (spanInfo ? spanInfo[1] : 0));
       if (!f) return 'nothing';
       const wasOff = !cam.auto;
       cam.auto = true;
-      goTo(f);
-      cam.dur = 4;
+      goTo(f, 4);
       ev.state = 'going'; ev.wasOff = wasOff; ev.last = performance.now();
       const c = sys.civState;
       evLog.rows.push({ d: c ? c.age : 0, text: `Now viewing ${nameOf(sys, f)}`, at: performance.now() });
@@ -4755,7 +4929,7 @@ if (wallpaper) {
     state() {
       const c = sys.civState || {};
       return JSON.stringify({ story: civStory.length, arc: c.arc ? c.arc.kind : null, final: c.final ? c.final.kind : null, people: c.people, status: c.status, age: c.age, gates: c.gates, settled: c.settled, reach: c.reach, vigor: c.vigor, surface: sys.surface, lanesNow: sys.lanesNow && sys.lanesNow.length, seed: sys.seed, z: cam.z, k: cam.k, palette: sys.pal.name, paused, frozen, lite: LITE, auto: cam.auto,
-        ready: !!sys.ready, width: canvas.width, height: canvas.height, suns: sys.suns.length, worlds: sys.worlds.length, quality });
+        ready: !!sys.ready, width: canvas.width, height: canvas.height, suns: sys.suns.length, worlds: sys.worlds.length, quality, frames: framesDrawn, frameRate, slow: slowLog, errors: errorLog, errorCount });
     },
   };
 }
@@ -4813,14 +4987,13 @@ function eventTick() {
   const c = s.civState, wasOff = !cam.auto;
   if (p.e.kind === 'reach') {
     const level = clamp(c.reach, 1, LEVEL_MAX);
-    for (let L = 1; L <= level; L++) { queueJob(s, () => plateDisc(s, L)); queueJob(s, () => plate(s, L)); }
+    for (let L = 1; L <= level; L++) queuePlate(s, L);
     cam.auto = true; cam.planned = level; cam.hold = 0;
   } else {
     const f = eventPlace(s, c, p.e);
     if (!f) return;
     cam.auto = true;
-    goTo(f);
-    cam.dur = cam.z < 0 ? cam.dur : Math.min(cam.dur, 6);
+    goTo(f, 6);
   }
   ev.state = 'going'; ev.wasOff = wasOff; ev.last = now; ev.kind = p.e.kind;
 }
@@ -4842,7 +5015,13 @@ function eventArrived() {
 function drawEventLog(s) {
   if (evLog.seed !== s.seed) seedEventLog(s);
   if (!evLog.rows.length) return;
-  const now = performance.now(), { pal } = s, ROW = 15;
+  const now = performance.now(), { pal } = s, ROW = 15, n = evLog.rows.length;
+  const key = [s.seed, pal.name, pal.accent, s.W, s.H, s.dpr, ...evLog.rows.map(r => r.d + r.text + (now - r.at < 30000))].join(';');
+  const top = Math.floor(s.H - PANEL_BOTTOM - (n - 0.5) * ROW - 2);
+  stampPanel('events', key, Math.floor(s.W * 0.25), top, Math.ceil(s.W * 0.75), n * ROW + 4, g => paintEventLog(g, s, now));
+}
+function paintEventLog(ctx, s, now) {
+  const { pal } = s, ROW = 15;
   ctx.font = '400 10.5px ui-monospace, SFMono-Regular, Menlo, monospace';
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'right';
@@ -5209,7 +5388,7 @@ function zoomLevel(l) {
   if (frozen || cam.u < 1 || exp.want !== null) return;
   l = clamp(l, 0, LEVEL_MAX);
   if (l === Math.round(cam.z)) return;
-  for (let L = 1; L <= LEVEL_MAX; L++) if (l >= L) { queueJob(sys, () => plateDisc(sys, L)); queueJob(sys, () => plate(sys, L)); }
+  for (let L = 1; L <= LEVEL_MAX; L++) if (l >= L) queuePlate(sys, L);
   exp.want = l;
 }
 /* Called by the camera while it stays where it was put. */
@@ -5221,8 +5400,7 @@ function stayStep() {
 /*SITE-SKIP*/
 function zoomInto(f) {
   if (frozen || !atChart() || !f) return;
-  goTo(f);
-  cam.dur = 4;
+  goTo(f, 4);
   exploreRefresh(true);
 }
 function backToChart() {
@@ -5445,9 +5623,9 @@ function initExplore() {
   const out = exploreEl('button', '', 'Zoom out', () => zoomLevel(Math.round(cam.z) + 1));
   const inward = exploreEl('button', '', 'Zoom in', () => { const l = Math.round(cam.z); if (l > 0) zoomLevel(l - 1); else if (exp.sel) zoomInto(exp.sel); });
   const view = exploreEl('button', '', 'Home view', () => {
-    cam.viewTo = cam.viewTo ? 0 : 1;
-    viewMode = cam.viewTo ? 'home' : 'star';
-    if (cam.viewTo) { homeLayer(sys); homeDisc(sys); }
+    const want = (pendingView !== null ? pendingView : cam.viewTo) ? 0 : 1;
+    viewMode = want ? 'home' : 'star';
+    requestView(want);
     if (frozen) { cam.k = cam.viewTo; render(startAt); }
     exploreRefresh(true);
   });
@@ -5520,14 +5698,16 @@ function currentSeed() {
 }
 
 function start(seed, built) {
-  cancelAnimationFrame(raf);
-  const W = canvas.clientWidth || window.innerWidth, H = canvas.clientHeight || window.innerHeight;
+  stopFrames();
+  const t0 = performance.now(), marks = [];
+  const W = spanInfo ? spanInfo[2] : canvas.clientWidth || window.innerWidth, H = spanInfo ? spanInfo[3] : canvas.clientHeight || window.innerHeight;
   sys = built && built.W === W && built.H === H ? built : build(seed, W, H);
+  marks.push(built === sys ? 'start(prebuilt)' : 'start:build', performance.now() - t0);
   const home = sys.worlds[sys.homeIdx];
   sys.vs = (Math.min(W, H) * 0.34) / home.a;
   sys.hx = 0; sys.hy = 0;
-  canvas.width = Math.round(W * sys.dpr);
-  canvas.height = Math.round(H * sys.dpr);
+  canvas.width = Math.round((spanInfo ? window.innerWidth : W) * sys.dpr);
+  canvas.height = Math.round((spanInfo ? window.innerHeight : H) * sys.dpr);
 
   const root = document.documentElement.style;
   root.setProperty('--paper', sys.pal.paper);
@@ -5540,8 +5720,11 @@ function start(seed, built) {
   lastT = 0;
   liveEvents.length = 0;
   cam.planned = null;
+  cam.waitFor = null;
+  cam.visitNext = null;
   pendingBuild = null;
   if (wallpaper) applyCiv(true);
+  marks.push('civ', performance.now() - t0);
   /* Each new system starts on its chart, in whichever view you were using. */
   cam.z = testZ !== null ? clamp(testZ, LEVEL_MIN, LEVEL_MAX) : 0;
   cam.k = cam.viewTo;
@@ -5556,10 +5739,12 @@ function start(seed, built) {
     if (f) setFocus(sys, f);
   }
   render(startAt);
+  marks.push('first render k' + cam.k, performance.now() - t0);
+  noteSlow(marks, t0);
   if (!frozen) {
     startedAt = performance.now();
     lastDraw = startedAt;
-    raf = requestAnimationFrame(loop);
+    nextFrame(0);
     preload(sys);
   }
 }
@@ -5569,15 +5754,15 @@ function newSeed() { return 1 + Math.floor(Math.random() * 99998); }
 const viewBtn = document.getElementById('view');
 const zoomBtn = document.getElementById('zoom');
 function syncButtons() {
-  viewBtn.textContent = cam.viewTo ? 'Star view' : 'Home view';
-  viewBtn.setAttribute('aria-pressed', String(cam.viewTo === 1));
+  const v = pendingView !== null ? pendingView : cam.viewTo;
+  viewBtn.textContent = v ? 'Star view' : 'Home view';
+  viewBtn.setAttribute('aria-pressed', String(v === 1));
   zoomBtn.textContent = cam.auto ? 'Zoom off' : 'Zoom on';
   zoomBtn.setAttribute('aria-pressed', String(cam.auto));
 }
 viewBtn.addEventListener('click', () => {
-  cam.viewTo = cam.viewTo ? 0 : 1;
-  /* Build the new sky now, so the cross-fade itself stays smooth. */
-  if (cam.viewTo) { homeLayer(sys); homeDisc(sys); }
+  /* The new sky is painted in the background first, so the cross-fade itself stays smooth. */
+  requestView((pendingView !== null ? pendingView : cam.viewTo) ? 0 : 1);
   if (frozen) { cam.k = cam.viewTo; render(startAt); }
   syncButtons();
   updateScale();
@@ -5617,12 +5802,13 @@ if (wallpaper) {
   if (params.get('dust')) dustMul = parseFloat(params.get('dust')) || 1;
   if (params.get('paper')) customPalette = { name: 'custom', paper: params.get('paper'), ink: params.get('ink'), ink2: params.get('ink2'), accent: params.get('accent') };
   if (spanInfo) {
-    /* One system across several displays: the canvas is the whole desktop, and this display shows its part. */
+    /* One system across several displays: laid out on the whole desktop, and this display draws only its part
+       (see spanAt, where the context is shifted). */
     canvas.style.position = 'absolute';
-    canvas.style.left = -spanInfo[0] + 'px';
-    canvas.style.top = -spanInfo[1] + 'px';
-    canvas.style.width = spanInfo[2] + 'px';
-    canvas.style.height = spanInfo[3] + 'px';
+    canvas.style.left = '0px';
+    canvas.style.top = '0px';
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
   }
   if (explore) { const h = parseInt(location.hash.slice(1), 10); if (h > 0) params.set('seed', h); cam.viewTo = 0; }
   start(parseInt(params.get('seed'), 10) || newSeed());

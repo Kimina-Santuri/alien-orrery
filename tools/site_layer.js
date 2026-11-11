@@ -374,8 +374,7 @@ function siteTick() {
 }
 
 function start(seed, built) {
-  cancelAnimationFrame(raf);
-  raf = 0;
+  stopFrames();
   const W = canvas.clientWidth || window.innerWidth, H = canvas.clientHeight || window.innerHeight;
   sys = built && built.W === W && built.H === H ? built : build(seed, W, H);
   const home = sys.worlds[sys.homeIdx];
@@ -410,7 +409,7 @@ function start(seed, built) {
 function resume() {
   if (frozen || raf || !sys || !inView || document.hidden) return;
   lastDraw = performance.now();
-  raf = requestAnimationFrame(loop);
+  nextFrame(0);
 }
 
 let inView = true;

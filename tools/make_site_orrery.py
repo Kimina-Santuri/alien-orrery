@@ -42,7 +42,7 @@ sub("const crumbles = followEvents || explore; /* worlds and suns come apart in 
 sub("let forcedPalette = null,", "let forcedPalette = OPTS.palette || null,")
 sub("window.orrery = {", "window[OPTS.mini ? 'orreryMini' : 'orrery'] = {")
 s = re.sub(r"    /\* A click on the wallpaper, passed in by the app.*?(?=    explored\(\) \{)", "", s, flags=re.S)
-sub("if (now - lastDraw < (moving && !LITE && quality > 0.7 ? 15 : 32)) return;", "if (now - lastDraw < (OPTS.mini ? 66 : moving && !LITE && quality > 0.7 ? 15 : 32)) return;")
+sub("  const target = 1000 / (moving && !LITE && quality > 0.7 ? frameRate.move : frameRate.rest);", "  const target = OPTS.mini ? 66 : 1000 / (moving && !LITE && quality > 0.7 ? frameRate.move : frameRate.rest);")
 sub("  document.getElementById('scale').textContent = `${label} · ${size}`;\n", "  void label; void size;\n")
 # Enough worlds for every page; suns kept right or top, clear of the navigation.
 s = re.sub(r"  const n = kind === 'compact' \? (.*?);\n", lambda m: "  const n = Math.max(11, kind === 'compact' ? " + m.group(1) + ");\n", s, count=1)
@@ -63,7 +63,7 @@ sub("  /* Transcendence: worlds pour in as spiralling grain, and a swarm thicken
 sub("  for (const o of worlds) drawWorld(s, o, t);\n", "  for (const o of worlds) drawWorld(s, o, t);\n  if (scale === 1 && cam.k === 0 && SITE.page === 'home') drawPageLabels(s);\n")
 # Panel on the right, out of the player's way, and naming this page.
 sub("const CELL_W = 8.4, CELL_H = 12, ROW_H = 19, PANEL_LEFT = 28, PANEL_BOTTOM = 104;", "const CELL_W = 8.4, CELL_H = 12, ROW_H = 19, PANEL_BOTTOM = 66;\nlet PANEL_LEFT = 28;")
-sub("  const rows = flipper.rows;\n  let y = s.H - PANEL_BOTTOM - rows.length * ROW_H;\n", "  const rows = flipper.rows;\n  if (s.W < 820 || SITE.page !== 'home') return;\n  PANEL_LEFT = s.W - 32 - Math.max(...rows.map(r => r.text.length)) * CELL_W;\n  let y = s.H - PANEL_BOTTOM - rows.length * ROW_H;\n")
+sub("  const rows = flipper.rows;\n  const top = s.H - PANEL_BOTTOM - rows.length * ROW_H;\n", "  const rows = flipper.rows;\n  if (s.W < 820 || SITE.page !== 'home') return;\n  PANEL_LEFT = s.W - 32 - Math.max(...rows.map(r => r.text.length)) * CELL_W;\n  const top = s.H - PANEL_BOTTOM - rows.length * ROW_H;\n")
 sub("  ctx.font = '500 10.5px ui-monospace, SFMono-Regular, Menlo, monospace';", "  ctx.font = '400 10.5px \"JetBrains Mono\", ui-monospace, Menlo, monospace';")
 sub("    if (civTimer <= 0) {", "    siteTick();\n    if (civTimer <= 0) {")
 sub("function loop(now) {\n", "function loop(now) {\n  if (!inView || document.hidden) { raf = 0; return; }\n")

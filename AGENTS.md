@@ -272,3 +272,21 @@ Published at the user's request from a plain `build.sh` (version 0.6.1, build 11
 ## 2026-11-08: Music world for the website (committed)
 
 - `tools/site_layer.js` and `tools/make_site_orrery.py`: the website's new Music page gets its own world (at least 11 worlds). This was live on kimina.co.ke since c745d8e but uncommitted here. Verified: running `make_site_orrery.py` reproduces the website's committed `orrery.js` byte for byte. Committed and pushed at the user's request; no app or release change.
+
+## 2026-11-11: power and stalls (installed for the user as a private build, not committed, not released)
+User's report: the orrery uses a lot of power, and it's glitchy, especially when switching views or when a new system is made.
+Measured first (ps CPU time over 30-45 s, app plus its WebKit processes, two displays spanned, on battery, `pauseOnBattery` off): about 78% of one core with the chart at rest. WindowServer was ~55% with or without the app, so it isn't counted.
+Power:
+- Chronicle and event log are painted once into small canvases and stamped (`stampPanel`, `paintChronicle`, `paintEventLog`); only a flip draws letter by letter. Drawing the cipher glyphs every frame was about half the cost.
+- Spanned displays: each window used to draw the whole desktop and show its part (3600x4138 on the built-in screen). Now its canvas is its own size and the main context's `setTransform` is shifted by its place (`spanAt`, `screenIdentity` for true screen-space draws). Layout still uses the whole desktop (`s.W`, `s.H`); clicks add the offset back.
+- Frame rate is `frameRate` (rest, move), set by `orrery.setFrameRate`; the loop sleeps on a timer between frames (`nextFrame`, `stopFrames`) instead of being called at the display's rate. The app sends 15/30 on battery and 30/60 plugged in; menu item "Slower on battery" (`slowOnBattery`, default on). The adaptive-quality thresholds are now relative to the target frame time.
+- Result at rest on battery: 78% → 22-23% of a core (30 fps plugged in: about 30%). Constant zooming measured about the same before and after (~40%).
+Stalls (found with a new slow-frame log: `orrery.state()` now has `slow`, `errors`, `errorCount`, `frames`):
+- An event zoom froze the page for 2.9 s, close-ups 1.1-2 s, far scales 0.1-0.5 s, a new system or a switch into Home view 0.4-0.5 s.
+- The plate builders (`buildCloseup` and its kinds, `buildNeighbourhood`, `buildGalaxy`, `buildGroup`, `buildSupercluster`, `starfield`) are now generators. `plateDisc`/`plate` still finish on the spot when asked directly; `queuePlate` paints in the background through `plateWork`, which shares one generator per plate (and per close-up subject), and `holding` gives each step its own canvas and subject. `grainDiscSteps` and `mipsGen` can pause too.
+- `goTo` waits for its close-up (`cam.waitFor`) instead of painting it on the spot; `goTo(f, dur)` takes the journey length. `setView`/the view buttons call `requestView`, which paints the home sky first (`pendingView`, `settleView`). `swapSystem` picks the new system's view up front and `buildFull` paints its home sky with it.
+- Background work gets a slice of each frame scaled to the frame time (4 ms moving, 7-20 ms at rest).
+- After: worst step in a stress run (views, every close-up kind, new systems, fast zooming) about 0.1-0.15 s, no page errors. The first frame after launch in Home view still paints its sky on the spot (~0.5 s, launch only), and the first draw of a fresh close-up can take ~0.1 s (WebKit uploading it).
+Bug met on the way: frame errors show only as "Script error." in WKWebView file pages, so `loop` now catches them into `errorLog` with a stack.
+Website: `tools/make_site_orrery.py` and `tools/site_layer.js` updated for the new loop and chronicle; generated on a throwaway copy, and the home and about pages ran 14 s in headless Brave with no errors. The website's `orrery.js` itself is not regenerated.
+Not verified: power watts or battery hours (needs sudo), how it looks by eye in motion, a whole day of running, a real lock-screen refresh, the Explore window by hand, the website on a phone.
